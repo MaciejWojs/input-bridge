@@ -4,9 +4,17 @@
 #include <string>
 
 class PlatformInputWin : public IPlatformInput {
+    private:
+    std::vector<INPUT> m_winInputs;
+
     public:
-    void MoveMouse(int32_t x, int32_t y) override {
-        Log("PlatformInputWin: MoveMouse x=" + std::to_string(x) + " y=" + std::to_string(y));
+    PlatformInputWin() {
+        // Reserve memory up front to prevent frequent allocations on every flush
+        m_winInputs.reserve(1024);
+    }
+
+    void MoveMouseRelative(int32_t x, int32_t y) override {
+        Log("PlatformInputWin: MoveMouseRelative x=" + std::to_string(x) + " y=" + std::to_string(y));
 
         INPUT input = { 0 };
         input.type = INPUT_MOUSE;
@@ -16,29 +24,51 @@ class PlatformInputWin : public IPlatformInput {
         SendInput(1, &input, sizeof(INPUT));
     }
 
-    void MouseClick(int32_t button, bool down) override {
-        Log("PlatformInputWin: MouseClick button=" + std::to_string(button) + " down=" + (down ? "true" : "false"));
+    void MoveMouseAbsolute(int32_t x, int32_t y) override {
+        Log("PlatformInputWin: MoveMouseAbsolute x=" + std::to_string(x) + " y=" + std::to_string(y));
 
         INPUT input = { 0 };
         input.type = INPUT_MOUSE;
-        if (button == 0) {
+        input.mi.dx = (x * 65535) / (GetSystemMetrics(SM_CXSCREEN) - 1);
+        input.mi.dy = (y * 65535) / (GetSystemMetrics(SM_CYSCREEN) - 1);
+        input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+        SendInput(1, &input, sizeof(INPUT));
+    }
+
+    void MouseClick(int32_t button, bool down) override {
+        INPUT input = { 0 };
+        input.type = INPUT_MOUSE;
+
+        switch (button) {
+        case 0:
             input.mi.dwFlags = down ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
-        } else if (button == 1) {
+            break;
+        case 1:
             input.mi.dwFlags = down ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP;
-        } else if (button == 2) {
+            break;
+        case 2:
             input.mi.dwFlags = down ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP;
+            break;
+        default: return;
         }
         SendInput(1, &input, sizeof(INPUT));
     }
 
     void KeyPress(int32_t keyCode, bool down) override {
-        Log("PlatformInputWin: KeyPress keyCode=" + std::to_string(keyCode) + " down=" + (down ? "true" : "false"));
-
         INPUT input = { 0 };
         input.type = INPUT_KEYBOARD;
         input.ki.wVk = static_cast<WORD>(keyCode);
+        input.ki.wScan = static_cast<WORD>(MapVirtualKey(input.ki.wVk, MAPVK_VK_TO_VSC));
+
+        input.ki.dwFlags = KEYEVENTF_SCANCODE;
+
+        // Extended keys (like arrows, Home, End) require the KEYEVENTF_EXTENDEDKEY flag
+        if (keyCode >= 33 && keyCode <= 46) {
+            input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+        }
+
         if (!down) {
-            input.ki.dwFlags = KEYEVENTF_KEYUP;
+            input.ki.dwFlags |= KEYEVENTF_KEYUP;
         }
         SendInput(1, &input, sizeof(INPUT));
     }
@@ -51,6 +81,52 @@ class PlatformInputWin : public IPlatformInput {
         input.mi.mouseData = delta;
         input.mi.dwFlags = MOUSEEVENTF_WHEEL;
         SendInput(1, &input, sizeof(INPUT));
+    }
+
+    void ExecuteEvents(const std::vector<InputEvent>& events) override {
+        Log("PlatformInputWin: Execute batch of " + std::to_string(events.size()) + " events");
+
+        m_winInputs.clear();
+
+        for (const auto& ev : events) {
+            INPUT input = { 0 };
+
+            std::visit([&input](auto&& e) {
+                using T = std::decay_t<decltype(e)>;
+                if constexpr (std::is_same_v<T, struct MouseMoveRelative>) {
+                    input.type = INPUT_MOUSE;
+                    input.mi.dx = e.x;
+                    input.mi.dy = e.y;
+                    input.mi.dwFlags = MOUSEEVENTF_MOVE;
+                } else if constexpr (std::is_same_v<T, struct MouseMoveAbsolute>) {
+                    input.type = INPUT_MOUSE;
+                    input.mi.dx = (e.x * 65535) / (GetSystemMetrics(SM_CXSCREEN) - 1);
+                    input.mi.dy = (e.y * 65535) / (GetSystemMetrics(SM_CYSCREEN) - 1);
+                    input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+                } else if constexpr (std::is_same_v<T, struct MouseClick>) {
+                    input.type = INPUT_MOUSE;
+                    if (e.button == 0)      input.mi.dwFlags = e.down ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
+                    else if (e.button == 1) input.mi.dwFlags = e.down ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP;
+                    else if (e.button == 2) input.mi.dwFlags = e.down ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP;
+                } else if constexpr (std::is_same_v<T, struct KeyPress>) {
+                    input.type = INPUT_KEYBOARD;
+                    input.ki.wVk = static_cast<WORD>(e.keyCode);
+                    input.ki.wScan = MapVirtualKey(input.ki.wVk, MAPVK_VK_TO_VSC);
+                    input.ki.dwFlags = KEYEVENTF_SCANCODE;
+                    if (!e.down) {
+                        input.ki.dwFlags |= KEYEVENTF_KEYUP;
+                    }
+                } else if constexpr (std::is_same_v<T, struct MouseScroll>) {
+                    input.mi.dwFlags = MOUSEEVENTF_WHEEL;
+                }
+                }, ev);
+
+            m_winInputs.push_back(input);
+        }
+
+        if (!m_winInputs.empty()) {
+            SendInput(static_cast<UINT>(m_winInputs.size()), m_winInputs.data(), sizeof(INPUT));
+        }
     }
 };
 

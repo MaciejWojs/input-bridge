@@ -2,8 +2,12 @@
 #include <iostream>
 
 class PlatformInputLinux : public IPlatformInput {
-public:
-    void MoveMouse(int32_t x, int32_t y) override {
+    public:
+    void MoveMouseRelative(int32_t x, int32_t y) override {
+        // Implement with uinput or X11/XTest or Wayland/ydotool
+    }
+
+    void MoveMouseAbsolute(int32_t x, int32_t y) override {
         // Implement with uinput or X11/XTest or Wayland/ydotool
     }
 

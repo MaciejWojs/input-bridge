@@ -3,7 +3,11 @@
 
 class PlatformInputStub : public IPlatformInput {
     public:
-    void MoveMouse(int32_t x, int32_t y) override {
+    void MoveMouseRelative(int32_t x, int32_t y) override {
+        // NotImplemented
+    }
+
+    void MoveMouseAbsolute(int32_t x, int32_t y) override {
         // NotImplemented
     }
 
