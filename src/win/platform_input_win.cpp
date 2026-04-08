@@ -83,6 +83,21 @@ class PlatformInputWin : public IPlatformInput {
         SendInput(1, &input, sizeof(INPUT));
     }
 
+    void TypeCharacter(char16_t charCode) override {
+        Log("PlatformInputWin: TypeCharacter charCode=" + std::to_string(charCode));
+
+        INPUT inputs[2] = { 0 };
+        inputs[0].type = INPUT_KEYBOARD;
+        inputs[0].ki.wScan = static_cast<WORD>(charCode);
+        inputs[0].ki.dwFlags = KEYEVENTF_UNICODE;
+
+        inputs[1].type = INPUT_KEYBOARD;
+        inputs[1].ki.wScan = static_cast<WORD>(charCode);
+        inputs[1].ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+
+        SendInput(2, inputs, sizeof(INPUT));
+    }
+
     void ExecuteEvents(const std::vector<InputEvent>& events) override {
         Log("PlatformInputWin: Execute batch of " + std::to_string(events.size()) + " events");
 
@@ -90,8 +105,10 @@ class PlatformInputWin : public IPlatformInput {
 
         for (const auto& ev : events) {
             INPUT input = { 0 };
+            bool hasSecond = false;
+            INPUT input2 = { 0 };
 
-            std::visit([&input](auto&& e) {
+            std::visit([&input, &hasSecond, &input2](auto&& e) {
                 using T = std::decay_t<decltype(e)>;
                 if constexpr (std::is_same_v<T, struct MouseMoveRelative>) {
                     input.type = INPUT_MOUSE;
@@ -117,11 +134,24 @@ class PlatformInputWin : public IPlatformInput {
                         input.ki.dwFlags |= KEYEVENTF_KEYUP;
                     }
                 } else if constexpr (std::is_same_v<T, struct MouseScroll>) {
+                    input.type = INPUT_MOUSE;
+                    input.mi.mouseData = e.delta;
                     input.mi.dwFlags = MOUSEEVENTF_WHEEL;
+                } else if constexpr (std::is_same_v<T, struct TypeCharacter>) {
+                    input.type = INPUT_KEYBOARD;
+                    input.ki.wScan = static_cast<WORD>(e.charCode);
+                    input.ki.dwFlags = KEYEVENTF_UNICODE;
+                    
+                    input2 = input;
+                    input2.ki.dwFlags |= KEYEVENTF_KEYUP;
+                    hasSecond = true;
                 }
                 }, ev);
 
             m_winInputs.push_back(input);
+            if (hasSecond) {
+                m_winInputs.push_back(input2);
+            }
         }
 
         if (!m_winInputs.empty()) {

@@ -14,6 +14,7 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
             InstanceMethod("mouseClick", &InputBridge::MouseClick),
             InstanceMethod("keyPress", &InputBridge::KeyPress),
             InstanceMethod("scrollMouse", &InputBridge::ScrollMouse),
+            InstanceMethod("typeString", &InputBridge::TypeString),
             InstanceMethod("optimizeMouseMovesRelative", &InputBridge::OptimizeMouseMovesRelative),
             InstanceMethod("optimizeMouseMovesAbsolute", &InputBridge::OptimizeMouseMovesAbsolute),
             InstanceMethod("toggleOptimization", &InputBridge::ToggleOptimization),
@@ -114,6 +115,19 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
             return info.Env().Undefined();
         }
         m_queue.QueueScrollMouse(info[0].As<Napi::Number>().Int32Value());
+        return info.Env().Undefined();
+    }
+
+    Napi::Value TypeString(const Napi::CallbackInfo& info) {
+        if (info.Length() < 1 || !info[0].IsString()) {
+            Napi::TypeError::New(info.Env(), "Expected string").ThrowAsJavaScriptException();
+            return info.Env().Undefined();
+        }
+        
+        std::u16string str = info[0].As<Napi::String>().Utf16Value();
+        for (char16_t c : str) {
+            m_queue.QueueTypeCharacter(c);
+        }
         return info.Env().Undefined();
     }
 

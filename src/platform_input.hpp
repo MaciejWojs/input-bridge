@@ -15,8 +15,9 @@ struct MouseMoveAbsolute { int32_t x; int32_t y; };
 struct MouseClick { int32_t button; bool down; };
 struct KeyPress { int32_t keyCode; bool down; };
 struct MouseScroll { int32_t delta; };
+struct TypeCharacter { char16_t charCode; };
 
-using InputEvent = std::variant<MouseMoveRelative, MouseMoveAbsolute, MouseClick, KeyPress, MouseScroll>;
+using InputEvent = std::variant<MouseMoveRelative, MouseMoveAbsolute, MouseClick, KeyPress, MouseScroll, TypeCharacter>;
 
 class IPlatformInput {
     protected:
@@ -40,6 +41,7 @@ class IPlatformInput {
     virtual void MouseClick(int32_t button, bool down) = 0;
     virtual void KeyPress(int32_t keyCode, bool down) = 0;
     virtual void ScrollMouse(int32_t delta) {} // optional
+    virtual void TypeCharacter(char16_t charCode) {} // optional
 
     // Default implementation that executes a batch of events in order. Platform-specific backends can override this for optimization.
     virtual void ExecuteEvents(const std::vector<InputEvent>& events) {
@@ -56,6 +58,8 @@ class IPlatformInput {
                     this->KeyPress(ev.keyCode, ev.down);
                 } else if constexpr (std::is_same_v<T, struct MouseScroll>) {
                     ScrollMouse(ev.delta);
+                } else if constexpr (std::is_same_v<T, struct TypeCharacter>) {
+                    this->TypeCharacter(ev.charCode);
                 }
                 }, event);
         }
@@ -91,6 +95,10 @@ class InputQueue {
 
     void QueueScrollMouse(int32_t delta) {
         m_events.push_back(MouseScroll{ delta });
+    }
+
+    void QueueTypeCharacter(char16_t charCode) {
+        m_events.push_back(struct TypeCharacter{ charCode });
     }
 
     private:

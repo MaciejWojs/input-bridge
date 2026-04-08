@@ -45,6 +45,12 @@ export interface IInputBridge {
     scrollMouse(delta: number): void;
 
     /**
+     * Queues a literal string of text to be typed by simulating Unicode character sequences.
+     * @param text - The literal string to type.
+     */
+    typeString(text: string): void;
+
+    /**
      * Optimizes queued relative mouse movements by dropping intermediate points 
      * that are closer than the given threshold.
      * @param distanceThreshold - The distance threshold in pixels.
