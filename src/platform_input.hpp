@@ -98,7 +98,7 @@ class InputQueue {
     }
 
     void QueueTypeCharacter(char16_t charCode) {
-        m_events.push_back(struct TypeCharacter{ charCode });
+        m_events.push_back(TypeCharacter{ charCode });
     }
 
     private:
