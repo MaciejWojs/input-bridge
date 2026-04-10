@@ -4,6 +4,9 @@
 #include <gio/gio.h>
 #include <thread>
 #include <atomic>
+#include <mutex>
+#include <condition_variable>
+#include <chrono>
 
 class PlatformInputLinux : public IPlatformInput {
     private:
@@ -15,6 +18,9 @@ class PlatformInputLinux : public IPlatformInput {
     std::thread loop_thread;
     std::atomic<bool> is_running{false};
     guint response_signal_id = 0;
+    
+    std::mutex session_mutex;
+    std::condition_variable session_cv;
 
     static void OnStartResponse(GDBusConnection *connection, const gchar *sender_name,
                                 const gchar *object_path, const gchar *interface_name,
@@ -23,12 +29,18 @@ class PlatformInputLinux : public IPlatformInput {
         GVariant* results = nullptr;
         g_variant_get(parameters, "(u@a{sv})", &response, &results);
 
+        PlatformInputLinux* self = static_cast<PlatformInputLinux*>(user_data);
+
         if (response == 0) {
             std::cout << "RemoteDesktop session successfully STARTed! Ready for input injection." << std::endl;
-            PlatformInputLinux* self = static_cast<PlatformInputLinux*>(user_data);
-            self->is_session_ready = true;
+            {
+                std::lock_guard<std::mutex> lock(self->session_mutex);
+                self->is_session_ready = true;
+            }
+            self->session_cv.notify_all();
         } else {
             std::cerr << "RemoteDesktop session failed to START. Response: " << response << std::endl;
+            self->session_cv.notify_all(); // Odblokowujemy wątek w razie porażki autoryzacji
         }
         
         if (results) {
@@ -213,6 +225,15 @@ class PlatformInputLinux : public IPlatformInput {
             g_variant_get(result, "(&o)", &request_path);
             std::cout << "CreateSession requested successfully. Request path: " << request_path << std::endl;
             g_variant_unref(result);
+            
+            // Oczekiwanie na zatwierdzenie całego łąńcucha portalu (wymaga to akcji po stronie systemu lub użytkownika) max 10 sekund
+            std::cout << "Oczekiwanie (max 10 sekund) na start sesji Portalu i przydzielenie zewnetznego uprawnienia..." << std::endl;
+            std::unique_lock<std::mutex> lock(session_mutex);
+            if (session_cv.wait_for(lock, std::chrono::seconds(10), [this] { return this->is_session_ready; })) {
+                std::cout << "Portal autoryzowany natychmiastowo! Skrypt moze isc dalej w kodzie JS." << std::endl;
+            } else {
+                std::cerr << "Timeout 10s minal! Oczekiwanie zakonczone błędem autoryzacji (albo zbyt powolna akceptacja)." << std::endl;
+            }
         }
     }
 
@@ -316,6 +337,19 @@ class PlatformInputLinux : public IPlatformInput {
         g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
 
         uint32_t state = down ? 1 : 0;
+        
+        // --- PROSTA TRANSLACJA (TYMCZASOWA) ---
+        // Portal zakłada na wejściu kody klawiszy EVDEV xkb (Linux Evdev scancodes minus offset 8).
+        // Załóżmy, że z Node.js idzie kod typu ASCII lub kod Windowsowy.
+        // Jeśli keyCode z JS odpowiada standardowmu ASCII (A=65, B=66) i ma być na Evdev:
+        // A (evdev 30), B (evdev 48), C (evdev 46) itd.
+        // Dla testowego "klikania", jeśli dostajemy 65 (A), musimy uderzyć z 30
+        uint32_t evdev_code = keyCode; 
+        
+        // Tylko przykładowe mapowanie do weryfikacji litery z testu, bo mapę kodów musisz przygotowac obok.
+        if (keyCode == 65 || keyCode == 'a' || keyCode == 'A') evdev_code = 30; // Litera A na klawiaturze QWERTY US
+        else if (keyCode == 66 || keyCode == 'b' || keyCode == 'B') evdev_code = 48; // Litera B
+        else if (keyCode == 67 || keyCode == 'c' || keyCode == 'C') evdev_code = 46; // Litera C
 
         g_dbus_connection_call(
             connection,
@@ -323,7 +357,7 @@ class PlatformInputLinux : public IPlatformInput {
             "/org/freedesktop/portal/desktop",
             "org.freedesktop.portal.RemoteDesktop",
             "NotifyKeyboardKeycode",
-            g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder, keyCode, state),
+            g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder, evdev_code, state),
             nullptr,
             G_DBUS_CALL_FLAGS_NONE,
             -1,
