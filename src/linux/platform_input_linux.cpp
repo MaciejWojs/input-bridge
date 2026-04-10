@@ -9,11 +9,125 @@ class PlatformInputLinux : public IPlatformInput {
     private:
     GDBusConnection* connection = nullptr;
     std::string session_handle;
+    bool is_session_ready = false;
     
     GMainLoop* main_loop = nullptr;
     std::thread loop_thread;
     std::atomic<bool> is_running{false};
     guint response_signal_id = 0;
+
+    static void OnStartResponse(GDBusConnection *connection, const gchar *sender_name,
+                                const gchar *object_path, const gchar *interface_name,
+                                const gchar *signal_name, GVariant *parameters, gpointer user_data) {
+        guint32 response;
+        GVariant* results = nullptr;
+        g_variant_get(parameters, "(u@a{sv})", &response, &results);
+
+        if (response == 0) {
+            std::cout << "RemoteDesktop session successfully STARTed! Ready for input injection." << std::endl;
+            PlatformInputLinux* self = static_cast<PlatformInputLinux*>(user_data);
+            self->is_session_ready = true;
+        } else {
+            std::cerr << "RemoteDesktop session failed to START. Response: " << response << std::endl;
+        }
+        
+        if (results) {
+            g_variant_unref(results);
+        }
+    }
+
+    static void StartSession(PlatformInputLinux* self) {
+        GError* error = nullptr;
+
+        // Subskrybuj sygnał Response dla wywołania Start
+        g_dbus_connection_signal_subscribe(
+            self->connection,
+            "org.freedesktop.portal.Desktop",
+            "org.freedesktop.portal.Request",
+            "Response",
+            nullptr,
+            nullptr,
+            G_DBUS_SIGNAL_FLAGS_NO_MATCH_RULE,
+            OnStartResponse,
+            self,
+            nullptr
+        );
+
+        std::cout << "Calling RemoteDesktop.Start on session " << self->session_handle << "..." << std::endl;
+
+        // BŁĄD BYŁ TUTAJ: "s" nie jest typem "container". Pusty napis podajemy jako "s" prosto do argumentów
+        GVariantBuilder options_builder;
+        g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
+
+        GVariant* start_result = g_dbus_connection_call_sync(
+            self->connection,
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.RemoteDesktop",
+            "Start",
+            g_variant_new("(osa{sv})", self->session_handle.c_str(), "", &options_builder),
+            G_VARIANT_TYPE("(o)"),
+            G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            nullptr,
+            &error
+        );
+
+        if (error) {
+            std::cerr << "Failed to Start session: " << error->message << std::endl;
+            g_error_free(error);
+        } else {
+            const gchar* request_path = nullptr;
+            g_variant_get(start_result, "(&o)", &request_path);
+            std::cout << "Start requested successfully. Request path: " << request_path << std::endl;
+            g_variant_unref(start_result);
+        }
+    }
+
+    static void SelectDevices(PlatformInputLinux* self) {
+        GError* error = nullptr;
+        std::cout << "Calling RemoteDesktop.SelectDevices on session " << self->session_handle << "..." << std::endl;
+
+        GVariantBuilder builder;
+        g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
+        
+        // Klasy urządzeń zdefiniowane w portalu:
+        // 1 = Klawiatura
+        // 2 = Myszko-podobne (Pointer)
+        // 4 = Dotykowe (Touchscreen)
+        // My chcemy Klawiaturę i Myszkę (1 | 2 = 3)
+        uint32_t types = 3; 
+
+        // Dodanie flagi "types" dla SelectDevices
+        g_variant_builder_add(&builder, "{sv}", "types", g_variant_new_uint32(types));
+
+        GVariant* result = g_dbus_connection_call_sync(
+            self->connection,
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.RemoteDesktop",
+            "SelectDevices",
+            g_variant_new("(oa{sv})", self->session_handle.c_str(), &builder),
+            G_VARIANT_TYPE("(o)"),
+            G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            nullptr,
+            &error
+        );
+
+        if (error) {
+            std::cerr << "Failed to SelectDevices: " << error->message << std::endl;
+            g_error_free(error);
+        } else {
+            const gchar* request_path = nullptr;
+            g_variant_get(result, "(&o)", &request_path);
+            std::cout << "SelectDevices returned request path: " << request_path << std::endl;
+            g_variant_unref(result);
+
+            // Po SelectDevices natychmiast wołamy Start
+            StartSession(self);
+        }
+    }
 
     static void OnCreateSessionResponse(GDBusConnection *connection, const gchar *sender_name,
                                         const gchar *object_path, const gchar *interface_name,
@@ -30,7 +144,8 @@ class PlatformInputLinux : public IPlatformInput {
                 PlatformInputLinux* self = static_cast<PlatformInputLinux*>(user_data);
                 self->session_handle = session_path;
                 
-                // TODO: Następny krok to wywołanie SelectDevices i Start na ścieżce sesji
+                // Natychmiast deklarujemy urządzenia na sesji
+                SelectDevices(self);
             }
         } else {
             std::cerr << "Portal session creation denied or failed. Response code: " << response << std::endl;
@@ -124,19 +239,98 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     void MoveMouseRelative(int32_t x, int32_t y) override {
-        // Implement with uinput or X11/XTest or Wayland/ydotool
+        if (!is_session_ready) return;
+
+        GVariantBuilder options_builder;
+        g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
+
+        g_dbus_connection_call(
+            connection,
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.RemoteDesktop",
+            "NotifyPointerMotion",
+            g_variant_new("(oa{sv}dd)", session_handle.c_str(), &options_builder, (double)x, (double)y),
+            nullptr,
+            G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            nullptr,
+            nullptr,
+            nullptr
+        );
     }
 
     void MoveMouseAbsolute(int32_t x, int32_t y) override {
-        // Implement with uinput or X11/XTest or Wayland/ydotool
+        if (!is_session_ready) return;
+
+        GVariantBuilder options_builder;
+        g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
+
+        g_dbus_connection_call(
+            connection,
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.RemoteDesktop",
+            "NotifyPointerMotionAbsolute",
+            g_variant_new("(oa{sv}udd)", session_handle.c_str(), &options_builder, 0, (double)x, (double)y),
+            nullptr,
+            G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            nullptr,
+            nullptr,
+            nullptr
+        );
     }
 
     void MouseClick(int32_t button, bool down) override {
-        // Implement with uinput or X11/XTest or Wayland/ydotool
+        if (!is_session_ready) return;
+
+        GVariantBuilder options_builder;
+        g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
+
+        uint32_t state = down ? 1 : 0;
+        uint32_t linux_button = 0x110; 
+        if (button == 1) linux_button = 0x111;
+        else if (button == 2) linux_button = 0x112;
+
+        g_dbus_connection_call(
+            connection,
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.RemoteDesktop",
+            "NotifyPointerButton",
+            g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder, linux_button, state),
+            nullptr,
+            G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            nullptr,
+            nullptr,
+            nullptr
+        );
     }
 
     void KeyPress(int32_t keyCode, bool down) override {
-        // Implement with uinput or X11/XTest or Wayland/ydotool
+        if (!is_session_ready) return;
+
+        GVariantBuilder options_builder;
+        g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
+
+        uint32_t state = down ? 1 : 0;
+
+        g_dbus_connection_call(
+            connection,
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.RemoteDesktop",
+            "NotifyKeyboardKeycode",
+            g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder, keyCode, state),
+            nullptr,
+            G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            nullptr,
+            nullptr,
+            nullptr
+        );
     }
 };
 
