@@ -292,13 +292,13 @@ class PlatformInputLinux : public IPlatformInput {
             g_variant_unref(result);
             
             // Waiting for the portal authorization chain to complete (requires system or user action), max 10 seconds
-            std::cout << "Oczekiwanie (max 10 sekund) na start sesji Portalu i przydzielenie zewnetznego uprawnienia..." << std::endl;
+            std::cout << "Waiting (max 10 seconds) for the Portal session to start and external permissions to be granted..." << std::endl;
             std::unique_lock<std::mutex> lock(session_mutex);
             if (session_cv.wait_for(lock, std::chrono::seconds(10), [this] { return this->is_session_ready; })) {
-                std::cout << "Portal autoryzowany natychmiastowo! Skrypt moze isc dalej w kodzie JS." << std::endl;
+                std::cout << "Portal authorized immediately! JS code can continue." << std::endl;
                 return true;
             } else {
-                error_msg = "Timeout 10s minal lub odrzucono! Oczekiwanie zakonczone błędem autoryzacji.";
+                error_msg = "Timeout expired or was denied! Authorization failed.";
                 return false;
             }
         }
