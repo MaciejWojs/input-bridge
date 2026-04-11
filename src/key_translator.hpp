@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-// Flagi maskujące platformowe 'RAW' sygnały wejściowe kodów klawiszy (32-bit int)
+// Masks for platform-specific 'RAW' input signal key codes (32-bit int)
 constexpr int32_t FLAG_RAW_WINDOWS = 0x10000000;
 constexpr int32_t FLAG_RAW_LINUX   = 0x20000000;
 constexpr int32_t FLAG_RAW_MASK    = 0xF0000000;
@@ -126,7 +126,7 @@ public:
             case 0x20: return 57; // SPACE
             case 0x14: return 58; // CAPS LOCK
 
-            // Strzałki
+            // Arrows
             case 0x25: return 105; // LEFT
             case 0x26: return 103; // UP
             case 0x27: return 106; // RIGHT
@@ -258,7 +258,7 @@ public:
             case 57: return 0x20; // KEY_SPACE -> VK_SPACE
             case 58: return 0x14; // KEY_CAPSLOCK -> VK_CAPITAL
 
-            // Strzałki
+            // Arrows
             case 105: return 0x25; // KEY_LEFT -> VK_LEFT
             case 103: return 0x26; // KEY_UP -> VK_UP
             case 106: return 0x27; // KEY_RIGHT -> VK_RIGHT

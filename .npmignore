@@ -1,7 +1,7 @@
-# Omijamy plik .gitignore, aby NPM nie ignorował katalogu dist
-# (NPM domyślnie korzysta z .gitignore, jeśli brak .npmignore)
+# Ignore .gitignore so NPM does not ignore the dist folder
+# (NPM uses .gitignore by default when .npmignore is absent)
 
-# Ignorujemy katalogi, których nie chcemy w paczce
+# Ignore directories we do not want in the package
 .github
 node_modules
 .vscode

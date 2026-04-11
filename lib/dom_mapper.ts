@@ -3,37 +3,37 @@ import * as os from 'node:os';
 const FLAG_RAW_WINDOWS = 0x10000000;
 const FLAG_RAW_LINUX   = 0x20000000;
 
-// Zmapowanie fizycznego klawisza (DOM event.code) z przeglądarki/Electrona 
-// bezpośrednio na uniwersalny sprzętowy skankod dla Linuxa (Evdev)
+// Map the physical key (DOM event.code) from the browser/Electron
+// directly to a universal Linux hardware scancode (Evdev)
 const DomToLinuxEvdev: Record<string, number> = {
-    // Litery
+    // Letters
     'KeyA': 30, 'KeyB': 48, 'KeyC': 46, 'KeyD': 32, 'KeyE': 18, 'KeyF': 33, 
     'KeyG': 34, 'KeyH': 35, 'KeyI': 23, 'KeyJ': 36, 'KeyK': 37, 'KeyL': 38, 
     'KeyM': 50, 'KeyN': 49, 'KeyO': 24, 'KeyP': 25, 'KeyQ': 16, 'KeyR': 19, 
     'KeyS': 31, 'KeyT': 20, 'KeyU': 22, 'KeyV': 47, 'KeyW': 17, 'KeyX': 45, 
     'KeyY': 21, 'KeyZ': 44,
 
-    // Cyfry
+    // Digits
     'Digit1': 2, 'Digit2': 3, 'Digit3': 4, 'Digit4': 5, 'Digit5': 6, 
     'Digit6': 7, 'Digit7': 8, 'Digit8': 9, 'Digit9': 10, 'Digit0': 11,
 
-    // Znaki specjalne
+    // Special characters
     'Minus': 12, 'Equal': 13, 'BracketLeft': 26, 'BracketRight': 27, 
     'Semicolon': 39, 'Quote': 40, 'Backquote': 41, 'Backslash': 43, 
     'Comma': 51, 'Period': 52, 'Slash': 53,
 
-    // Klawisze sterujące
+    // Control keys
     'Escape': 1, 'Enter': 28, 'Tab': 15, 'Space': 57, 'Backspace': 14, 
     'CapsLock': 58,
 
-    // Modyfikatory
+    // Modifiers
     'ShiftLeft': 42, 'ShiftRight': 54, 
     'ControlLeft': 29, 'ControlRight': 97, 
     'AltLeft': 56, 'AltRight': 100, 
     'MetaLeft': 125, 'MetaRight': 126, // Win / Super
     'OSLeft': 125, 'OSRight': 126,
 
-    // Nawigacja i strzałki
+    // Navigation and arrows
     'ArrowUp': 103, 'ArrowDown': 108, 'ArrowLeft': 105, 'ArrowRight': 106,
     'Insert': 110, 'Delete': 111, 'Home': 102, 'End': 107, 
     'PageUp': 104, 'PageDown': 109,
@@ -46,42 +46,42 @@ const DomToLinuxEvdev: Record<string, number> = {
     'Numpad4': 75, 'Numpad5': 76, 'Numpad6': 77, 'Numpad7': 71, 
     'Numpad8': 72, 'Numpad9': 73,
 
-    // Funkcyjne
+    // Function keys
     'F1': 59, 'F2': 60, 'F3': 61, 'F4': 62, 'F5': 63, 'F6': 64, 
     'F7': 65, 'F8': 66, 'F9': 67, 'F10': 68, 'F11': 87, 'F12': 88
 };
 
-// Zmapowanie fizycznego klawisza (DOM event.code) z przeglądarki/Electrona 
-// na kody Windows Virtual Key (VK). Używane z pominięciem tłumaczenia przez RAW flag.
+// Map the physical key (DOM event.code) from the browser/Electron
+// to Windows Virtual Key (VK) codes. Used while bypassing translation via RAW flags.
 const DomToWindowsVK: Record<string, number> = {
-    // Litery
+    // Letters
     'KeyA': 0x41, 'KeyB': 0x42, 'KeyC': 0x43, 'KeyD': 0x44, 'KeyE': 0x45, 'KeyF': 0x46, 
     'KeyG': 0x47, 'KeyH': 0x48, 'KeyI': 0x49, 'KeyJ': 0x4A, 'KeyK': 0x4B, 'KeyL': 0x4C, 
     'KeyM': 0x4D, 'KeyN': 0x4E, 'KeyO': 0x4F, 'KeyP': 0x50, 'KeyQ': 0x51, 'KeyR': 0x52, 
     'KeyS': 0x53, 'KeyT': 0x54, 'KeyU': 0x55, 'KeyV': 0x56, 'KeyW': 0x57, 'KeyX': 0x58, 
     'KeyY': 0x59, 'KeyZ': 0x5A,
 
-    // Cyfry
+    // Digits
     'Digit1': 0x31, 'Digit2': 0x32, 'Digit3': 0x33, 'Digit4': 0x34, 'Digit5': 0x35, 
     'Digit6': 0x36, 'Digit7': 0x37, 'Digit8': 0x38, 'Digit9': 0x39, 'Digit0': 0x30,
 
-    // Znaki specjalne
+    // Special characters
     'Minus': 0xBD, 'Equal': 0xBB, 'BracketLeft': 0xDB, 'BracketRight': 0xDD, 
     'Semicolon': 0xBA, 'Quote': 0xDE, 'Backquote': 0xC0, 'Backslash': 0xDC, 
     'Comma': 0xBC, 'Period': 0xBE, 'Slash': 0xBF,
 
-    // Klawisze sterujące
+    // Control keys
     'Escape': 0x1B, 'Enter': 0x0D, 'Tab': 0x09, 'Space': 0x20, 'Backspace': 0x08, 
     'CapsLock': 0x14,
 
-    // Modyfikatory
+    // Modifiers
     'ShiftLeft': 0xA0, 'ShiftRight': 0xA1, 
     'ControlLeft': 0xA2, 'ControlRight': 0xA3, 
     'AltLeft': 0xA4, 'AltRight': 0xA5, 
     'MetaLeft': 0x5B, 'MetaRight': 0x5C,
     'OSLeft': 0x5B, 'OSRight': 0x5C,
 
-    // Nawigacja i strzałki
+    // Navigation and arrows
     'ArrowUp': 0x26, 'ArrowDown': 0x28, 'ArrowLeft': 0x25, 'ArrowRight': 0x27,
     'Insert': 0x2D, 'Delete': 0x2E, 'Home': 0x24, 'End': 0x23, 
     'PageUp': 0x21, 'PageDown': 0x22,
@@ -100,22 +100,22 @@ const DomToWindowsVK: Record<string, number> = {
 };
 
 /**
- * Konwertuje stringowy identyfikator fizycznego klawisza (np. "KeyA", "ShiftLeft")
- * z `KeyboardEvent.code` przeglądarki na gotowy do wstrzyknięcia do C++
- * surowy kod dla odpowiedniego systemu operacyjnego.
- * Używa sprzętowego flagowania RAW, by ominąć translację natywnego C++.
+ * Converts a physical key string identifier (e.g. "KeyA", "ShiftLeft")
+ * from browser `KeyboardEvent.code` to a raw code ready for injection into C++
+ * for the target operating system.
+ * Uses RAW hardware flagging to bypass native C++ translation.
  */
 export function mapDomCodeToNativeTarget(codeStr: string): number | null {
     const isLinux = os.platform() === 'linux';
 
     if (isLinux) {
         const evdev = DomToLinuxEvdev[codeStr];
-        // Jeśli na Linuksie wspieramy RAW - dodajemy maskę
+        // If RAW is supported on Linux, add the mask
         return evdev !== undefined ? (evdev | FLAG_RAW_LINUX) : null;
     } else {
-        // Platformy Windows i fallback
+        // Windows platforms and fallback
         const vk = DomToWindowsVK[codeStr];
-        // Wysyłamy RAW WindowsVK by backend zignorował ew tłumaczenie odwrotne w hookach C++.
+        // Send RAW WindowsVK so the backend ignores any reverse translation in C++ hooks.
         return vk !== undefined ? (vk | FLAG_RAW_WINDOWS) : null;
     }
 }

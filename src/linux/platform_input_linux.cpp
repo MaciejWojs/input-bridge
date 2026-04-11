@@ -237,20 +237,20 @@ class PlatformInputLinux : public IPlatformInput {
         }
         std::cout << "Successfully connected to D-Bus session bus." << std::endl;
 
-        // Uruchamiamy GMainLoop w osobnym wątku, aby odbierać asynchroniczne sygnały D-Bus
+        // Run the GMainLoop in a separate thread to receive asynchronous D-Bus signals
         main_loop = g_main_loop_new(nullptr, FALSE);
         is_running = true;
         loop_thread = std::thread([this]() {
             g_main_loop_run(this->main_loop);
         });
 
-        // Subskrybuj sygnał Response OD RAZU, by nie przegapić odpowiedzi portalu
+        // Subscribe to the Response signal IMMEDIATELY so we don't miss the portal reply
         response_signal_id = g_dbus_connection_signal_subscribe(
             connection,
             "org.freedesktop.portal.Desktop",
             "org.freedesktop.portal.Request",
             "Response",
-            nullptr, // object path będzie znany po wywołaniu CreateSession, ale chwytamy globalnie
+            nullptr, // object path will be known after CreateSession, but we capture it globally
             nullptr,
             G_DBUS_SIGNAL_FLAGS_NONE,
             OnPortalResponse,
@@ -258,14 +258,14 @@ class PlatformInputLinux : public IPlatformInput {
             nullptr
         );
 
-        // Parametry dla CreateSession (np. token, abyśmy znali Request ID)
+        // Parameters for CreateSession (e.g. token so we know the Request ID)
         GVariantBuilder builder;
         g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
         g_variant_builder_add(&builder, "{sv}", "session_handle_token", g_variant_new_string("inputbridgesession"));
         g_variant_builder_add(&builder, "{sv}", "handle_token", g_variant_new_string("createReq"));
         
         
-        // Wywołujemy CreateSession
+        // Call CreateSession
         std::cout << "Requesting RemoteDesktop session..." << std::endl;
         GVariant* result = g_dbus_connection_call_sync(
             connection,
@@ -276,7 +276,7 @@ class PlatformInputLinux : public IPlatformInput {
             g_variant_new("(a{sv})", &builder),
             G_VARIANT_TYPE("(o)"),
             G_DBUS_CALL_FLAGS_NONE,
-            -1, // timeout domyślny
+            -1, // default timeout
             nullptr,
             &error
         );
@@ -291,7 +291,7 @@ class PlatformInputLinux : public IPlatformInput {
             std::cout << "CreateSession requested successfully. Request path: " << request_path << std::endl;
             g_variant_unref(result);
             
-            // Oczekiwanie na zatwierdzenie całego łąńcucha portalu (wymaga to akcji po stronie systemu lub użytkownika) max 10 sekund
+            // Waiting for the portal authorization chain to complete (requires system or user action), max 10 seconds
             std::cout << "Oczekiwanie (max 10 sekund) na start sesji Portalu i przydzielenie zewnetznego uprawnienia..." << std::endl;
             std::unique_lock<std::mutex> lock(session_mutex);
             if (session_cv.wait_for(lock, std::chrono::seconds(10), [this] { return this->is_session_ready; })) {
@@ -307,7 +307,7 @@ class PlatformInputLinux : public IPlatformInput {
     public:
     
     PlatformInputLinux() {
-        // Obiekt zainicjalizuje sesję przez wywołanie Async Init
+        // This object will initialize the session via Async Init
     }
 
     ~PlatformInputLinux() {
@@ -406,20 +406,20 @@ class PlatformInputLinux : public IPlatformInput {
         uint32_t state = down ? 1 : 0;
         uint32_t evdev_code = 0;
 
-        // Sprawdzamy czy przyszło bitowe pole "Zostaw mnie, jestem z czystego portalu Linuksa"
+        // Check if we received the raw Linux portal field marker
         if ((keyCode & FLAG_RAW_MASK) == FLAG_RAW_LINUX) {
             evdev_code = keyCode & ~FLAG_RAW_MASK; 
         } 
-        // Oraz "Jestem czystym kodem Windows i trzeba mnie przetłumaczyć na Linuksa bo tu pracuje moduł"
+        // Or if this is raw Windows code that must be translated to Linux for this module
         else if ((keyCode & FLAG_RAW_MASK) == FLAG_RAW_WINDOWS) {
             evdev_code = KeyTranslator::WindowsToLinux(keyCode & ~FLAG_RAW_MASK);
         }
-        // Domyślny przypadek wejściowy z biblioteki z Node.js (który w JS zawsze jest Windowsie Virtual-Key'em)
+        // Default input case from Node.js library (in JS it is always a Windows Virtual-Key)
         else {
             evdev_code = KeyTranslator::WindowsToLinux(keyCode);
         }
 
-        // Jeżeli translator nie znał tego klawisza, bezpiecznie odrzucamy próbę napisania "wiatru"
+        // If the translator did not recognize the key, safely drop the injection attempt
         if (evdev_code == 0) {
             std::cerr << "[DBUS WARN] Nierozpoznany kod klawisza: " << keyCode << ". Pomijam zastrzyk." << std::endl;
             return;
@@ -447,21 +447,21 @@ class PlatformInputLinux : public IPlatformInput {
     uint32_t codepoint = static_cast<uint32_t>(charCode);
     uint32_t keysym = 0;
 
-    // 1. Próba mapowania przez libxkbcommon (jeśli załadowane)
+    // 1. Try mapping with libxkbcommon (if loaded)
     InitOptionalXkbCommon();
     if (xkb_utf32_to_keysym_func) {
         std::cout << "Mapping char '" << (char)charCode << "' (U+" << ToHex(codepoint) << ") using xkbcommon..." << std::endl;
         keysym = xkb_utf32_to_keysym_func(codepoint);
     }
 
-    // 2. Fallback dla standardowego Unicode Keysym (jeśli xkb zawiedzie)
+    // 2. Fallback to the standard Unicode Keysym (if xkb fails)
     if (keysym == 0) {
         if (codepoint >= 0x20 && codepoint <= 0x7E) {
             keysym = codepoint; // ASCII
         } else if (codepoint > 0x7E) {
-            keysym = codepoint | 0x01000000; // Standardowy prefiks Unicode w X11
+            keysym = codepoint | 0x01000000; // Standard Unicode prefix in X11
         } else {
-            // Obsługa klawiszy kontrolnych
+            // Handle control keys
             if (codepoint == 0x0D) keysym = 0xFF0D;      // Enter
             else if (codepoint == 0x08) keysym = 0xFF08; // Backspace
             else if (codepoint == 0x09) keysym = 0xFF09; // Tab
@@ -469,13 +469,13 @@ class PlatformInputLinux : public IPlatformInput {
         }
     }
 
-    // Funkcja pomocnicza do wysyłania synchronicznego
+    // Helper function for synchronous sending
     auto send_keysym_sync = [&](bool down) {
         GVariantBuilder options_builder;
         g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
         
         GError* error = nullptr;
-        // Używamy CALL_SYNC, aby zachować kolejność znaków
+        // Use CALL_SYNC to preserve character order
         GVariant* result = g_dbus_connection_call_sync(
             connection,
             "org.freedesktop.portal.Desktop",
@@ -497,7 +497,7 @@ class PlatformInputLinux : public IPlatformInput {
         if (result) g_variant_unref(result);
     };
 
-    // Sekwencja musi być atomowa dla każdego znaku
+    // The sequence must be atomic for each character
     send_keysym_sync(true);  // Press
     send_keysym_sync(false); // Release
 }
