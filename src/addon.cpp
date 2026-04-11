@@ -9,6 +9,7 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
     public:
     static Napi::Object Init(Napi::Env env, Napi::Object exports) {
         Napi::Function func = DefineClass(env, "InputBridge", {
+            InstanceMethod("init", &InputBridge::InitAsync),
             InstanceMethod("moveMouseRelative", &InputBridge::MoveMouseRelative),
             InstanceMethod("moveMouseAbsolute", &InputBridge::MoveMouseAbsolute),
             InstanceMethod("mouseClick", &InputBridge::MouseClick),
@@ -30,6 +31,41 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
         return exports;
     }
 
+    class InitWorker : public Napi::AsyncWorker {
+        public:
+        InitWorker(Napi::Promise::Deferred deferred, IPlatformInput* platform)
+            : Napi::AsyncWorker(deferred.Env()), m_deferred(deferred), m_platform(platform), m_success(false) {}
+
+        ~InitWorker() {}
+
+        void Execute() override {
+            if (m_platform) {
+                m_success = m_platform->Initialize(m_errorMsg);
+            } else {
+                m_errorMsg = "Platform input instance is null";
+                m_success = false;
+            }
+        }
+
+        void OnOK() override {
+            if (m_success) {
+                m_deferred.Resolve(Env().Undefined());
+            } else {
+                m_deferred.Reject(Napi::Error::New(Env(), m_errorMsg).Value());
+            }
+        }
+
+        void OnError(const Napi::Error& e) override {
+            m_deferred.Reject(e.Value());
+        }
+
+        private:
+        Napi::Promise::Deferred m_deferred;
+        IPlatformInput* m_platform;
+        bool m_success;
+        std::string m_errorMsg;
+    };
+
     explicit InputBridge(const Napi::CallbackInfo& info)
         : Napi::ObjectWrap<InputBridge>(info),
         m_queue(CreatePlatformInput()) {
@@ -38,6 +74,16 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
     private:
     InputQueue m_queue;
     Napi::FunctionReference m_logger;
+
+    Napi::Value InitAsync(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        Napi::Promise::Deferred deferred = Napi::Promise::Deferred::New(env);
+
+        InitWorker* worker = new InitWorker(deferred, m_queue.GetPlatform());
+        worker->Queue();
+
+        return deferred.Promise();
+    }
 
     void Log(const std::string& msg) {
         if (!m_logger.IsEmpty()) {

@@ -24,25 +24,48 @@ class PlatformInputLinux : public IPlatformInput {
     std::mutex session_mutex;
     std::condition_variable session_cv;
 
-    static void OnStartResponse(GDBusConnection *connection, const gchar *sender_name,
-                                const gchar *object_path, const gchar *interface_name,
-                                const gchar *signal_name, GVariant *parameters, gpointer user_data) {
+    static void OnPortalResponse(GDBusConnection *connection, const gchar *sender_name,
+                                 const gchar *object_path, const gchar *interface_name,
+                                 const gchar *signal_name, GVariant *parameters, gpointer user_data) {
         guint32 response;
         GVariant* results = nullptr;
         g_variant_get(parameters, "(u@a{sv})", &response, &results);
 
         PlatformInputLinux* self = static_cast<PlatformInputLinux*>(user_data);
 
-        if (response == 0) {
-            std::cout << "RemoteDesktop session successfully STARTed! Ready for input injection." << std::endl;
-            {
-                std::lock_guard<std::mutex> lock(self->session_mutex);
-                self->is_session_ready = true;
+        if (g_str_has_suffix(object_path, "createReq")) {
+            if (response == 0) {
+                const gchar* session_path = nullptr;
+                g_variant_lookup(results, "session_handle", "s", &session_path);
+                if (session_path) {
+                    std::cout << "Portal session created! Session path: " << session_path << std::endl;
+                    self->session_handle = session_path;
+                    SelectDevices(self);
+                }
+            } else {
+                std::cerr << "Portal session creation denied. Response: " << response << std::endl;
+                self->session_cv.notify_all();
             }
-            self->session_cv.notify_all();
-        } else {
-            std::cerr << "RemoteDesktop session failed to START. Response: " << response << std::endl;
-            self->session_cv.notify_all(); // Odblokowujemy wątek w razie porażki autoryzacji
+        } else if (g_str_has_suffix(object_path, "selectReq")) {
+            if (response == 0) {
+                std::cout << "SelectDevices completed successfully." << std::endl;
+                StartSession(self);
+            } else {
+                std::cerr << "SelectDevices denied. Response: " << response << std::endl;
+                self->session_cv.notify_all();
+            }
+        } else if (g_str_has_suffix(object_path, "startReq")) {
+            if (response == 0) {
+                std::cout << "RemoteDesktop session successfully STARTed! Ready for input injection." << std::endl;
+                {
+                    std::lock_guard<std::mutex> lock(self->session_mutex);
+                    self->is_session_ready = true;
+                }
+                self->session_cv.notify_all();
+            } else {
+                std::cerr << "RemoteDesktop session failed to START. Response: " << response << std::endl;
+                self->session_cv.notify_all();
+            }
         }
         
         if (results) {
@@ -53,25 +76,11 @@ class PlatformInputLinux : public IPlatformInput {
     static void StartSession(PlatformInputLinux* self) {
         GError* error = nullptr;
 
-        // Subskrybuj sygnał Response dla wywołania Start
-        g_dbus_connection_signal_subscribe(
-            self->connection,
-            "org.freedesktop.portal.Desktop",
-            "org.freedesktop.portal.Request",
-            "Response",
-            nullptr,
-            nullptr,
-            G_DBUS_SIGNAL_FLAGS_NO_MATCH_RULE,
-            OnStartResponse,
-            self,
-            nullptr
-        );
-
         std::cout << "Calling RemoteDesktop.Start on session " << self->session_handle << "..." << std::endl;
 
-        // BŁĄD BYŁ TUTAJ: "s" nie jest typem "container". Pusty napis podajemy jako "s" prosto do argumentów
         GVariantBuilder options_builder;
         g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
+        g_variant_builder_add(&options_builder, "{sv}", "handle_token", g_variant_new_string("startReq"));
 
         GVariant* start_result = g_dbus_connection_call_sync(
             self->connection,
@@ -105,15 +114,10 @@ class PlatformInputLinux : public IPlatformInput {
         GVariantBuilder builder;
         g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
         
-        // Klasy urządzeń zdefiniowane w portalu:
-        // 1 = Klawiatura
-        // 2 = Myszko-podobne (Pointer)
-        // 4 = Dotykowe (Touchscreen)
-        // My chcemy Klawiaturę i Myszkę (1 | 2 = 3)
         uint32_t types = 3; 
 
-        // Dodanie flagi "types" dla SelectDevices
         g_variant_builder_add(&builder, "{sv}", "types", g_variant_new_uint32(types));
+        g_variant_builder_add(&builder, "{sv}", "handle_token", g_variant_new_string("selectReq"));
 
         GVariant* result = g_dbus_connection_call_sync(
             self->connection,
@@ -137,43 +141,16 @@ class PlatformInputLinux : public IPlatformInput {
             g_variant_get(result, "(&o)", &request_path);
             std::cout << "SelectDevices returned request path: " << request_path << std::endl;
             g_variant_unref(result);
-
-            // Po SelectDevices natychmiast wołamy Start
-            StartSession(self);
         }
     }
 
-    static void OnCreateSessionResponse(GDBusConnection *connection, const gchar *sender_name,
-                                        const gchar *object_path, const gchar *interface_name,
-                                        const gchar *signal_name, GVariant *parameters, gpointer user_data) {
-        guint32 response;
-        GVariant* results;
-        g_variant_get(parameters, "(u@a{sv})", &response, &results);
-
-        if (response == 0) { // 0 oznacza sukces
-            const gchar* session_path = nullptr;
-            g_variant_lookup(results, "session_handle", "s", &session_path);
-            if (session_path) {
-                std::cout << "Portal session created! Session path: " << session_path << std::endl;
-                PlatformInputLinux* self = static_cast<PlatformInputLinux*>(user_data);
-                self->session_handle = session_path;
-                
-                // Natychmiast deklarujemy urządzenia na sesji
-                SelectDevices(self);
-            }
-        } else {
-            std::cerr << "Portal session creation denied or failed. Response code: " << response << std::endl;
-        }
-        g_variant_unref(results);
-    }
-
-    void InitializePortal() {
+    bool Initialize(std::string& error_msg) override {
         GError* error = nullptr;
         connection = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &error);
         if (!connection) {
-            std::cerr << "Failed to connect to D-Bus session bus: " << error->message << std::endl;
+            error_msg = std::string("Failed to connect to D-Bus session bus: ") + error->message;
             g_error_free(error);
-            return;
+            return false;
         }
         std::cout << "Successfully connected to D-Bus session bus." << std::endl;
 
@@ -193,7 +170,7 @@ class PlatformInputLinux : public IPlatformInput {
             nullptr, // object path będzie znany po wywołaniu CreateSession, ale chwytamy globalnie
             nullptr,
             G_DBUS_SIGNAL_FLAGS_NO_MATCH_RULE,
-            OnCreateSessionResponse,
+            OnPortalResponse,
             this,
             nullptr
         );
@@ -202,6 +179,8 @@ class PlatformInputLinux : public IPlatformInput {
         GVariantBuilder builder;
         g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
         g_variant_builder_add(&builder, "{sv}", "session_handle_token", g_variant_new_string("inputbridgesession"));
+        g_variant_builder_add(&builder, "{sv}", "handle_token", g_variant_new_string("createReq"));
+        
         
         // Wywołujemy CreateSession
         std::cout << "Requesting RemoteDesktop session..." << std::endl;
@@ -220,8 +199,9 @@ class PlatformInputLinux : public IPlatformInput {
         );
 
         if (error != nullptr) {
-            std::cerr << "Failed to call CreateSession: " << error->message << std::endl;
+            error_msg = std::string("Failed to call CreateSession: ") + error->message;
             g_error_free(error);
+            return false;
         } else {
             const gchar* request_path = nullptr;
             g_variant_get(result, "(&o)", &request_path);
@@ -233,8 +213,10 @@ class PlatformInputLinux : public IPlatformInput {
             std::unique_lock<std::mutex> lock(session_mutex);
             if (session_cv.wait_for(lock, std::chrono::seconds(10), [this] { return this->is_session_ready; })) {
                 std::cout << "Portal autoryzowany natychmiastowo! Skrypt moze isc dalej w kodzie JS." << std::endl;
+                return true;
             } else {
-                std::cerr << "Timeout 10s minal! Oczekiwanie zakonczone błędem autoryzacji (albo zbyt powolna akceptacja)." << std::endl;
+                error_msg = "Timeout 10s minal lub odrzucono! Oczekiwanie zakonczone błędem autoryzacji.";
+                return false;
             }
         }
     }
@@ -242,7 +224,7 @@ class PlatformInputLinux : public IPlatformInput {
     public:
     
     PlatformInputLinux() {
-        InitializePortal();
+        // Obiekt zainicjalizuje sesję przez wywołanie Async Init
     }
 
     ~PlatformInputLinux() {
@@ -379,39 +361,46 @@ class PlatformInputLinux : public IPlatformInput {
     void TypeCharacter(char16_t charCode) override {
         if (!is_session_ready) return;
 
-        // Sekwencja wprowadzania znaków Unicode za pomocą tzw. "Linux Hex Input" wspieranego natywnie w GTK / IBus / Wayland
-        // 1. Wciśnij i przytrzymaj lewy Ctrl (VK_LCONTROL 0xA2) + Shift (VK_LSHIFT 0xA0)
-        KeyPress(0xA2, true);
-        KeyPress(0xA0, true);
-
-        // 2. Wciśnij klawisz 'u' (VK_U 0x55) by zainicjować "Unicode Mode"
-        KeyPress(0x55, true);
-        KeyPress(0x55, false);
-
-        // 3. Puść modyfikatory
-        KeyPress(0xA0, false);
-        KeyPress(0xA2, false);
-
-        // 4. Przekonwertuj kod Unicode do formy tekstowej szesnastkowej (np. char16_t dla 'ą' = 0x0105)
-        char hex[10];
-        std::snprintf(hex, sizeof(hex), "%x", (uint32_t)charCode);
-
-        // 5. Wklepuj po kolei litery / cyfry z HEX jako "normalne klawisze" klawiatury standardem Windows'owym
-        for (int i = 0; hex[i] != '\0'; i++) {
-            int32_t vk = 0;
-            if (hex[i] >= '0' && hex[i] <= '9') vk = 0x30 + (hex[i] - '0');
-            else if (hex[i] >= 'a' && hex[i] <= 'f') vk = 0x41 + (hex[i] - 'a');
-            else if (hex[i] >= 'A' && hex[i] <= 'F') vk = 0x41 + (hex[i] - 'A');
-            
-            if (vk != 0) {
-                KeyPress(vk, true);
-                KeyPress(vk, false);
-            }
+        // Zgodnie ze specyfikacją X11 / Wayland RemoteDesktop:
+        // Każdy znak Unicode można przetłumaczyć na Keysym poprzez dodanie 0x01000000.
+        // Nawet jeśli niektóre znaki mają dedykowane, nazwane kody w specyfikacji XKB (np. ś -> 0x1B6),
+        // kompozytory Wayland (np. Mutter) najstabilniej przyjmują absolutny U-Keysym, 
+        // dzięki czemu nie jest wymagana zależność od zewnętrznej biblioteki libxkbcommon-dev 
+        // ani zmaganie o odpowiedni stan układu klawiatury użytkownika.
+        
+        int32_t keysym = charCode;
+        if (charCode >= 0x0080 || charCode < 0x0020) { 
+            // Dla czystego ASCII pomijamy dodawanie maski. Dla wszystkiego innego - bezwzględny uniksowy keysym U.
+            keysym = charCode | 0x01000000;
         }
 
-        // 6. Zatwierdź wprowadzony ciąg HEX za pomocą klawisza Enter (VK_RETURN 0x0D) i patrz jak tworzy się chiński znaczek lub Polskie 'ć'!
-        KeyPress(0x0D, true);
-        KeyPress(0x0D, false);
+        GVariantBuilder options_builder;
+        g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
+
+        // State 1 (Pressed)
+        g_dbus_connection_call(
+            connection,
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.RemoteDesktop",
+            "NotifyKeyboardKeysym",
+            g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder, keysym, 1),
+            nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr, nullptr
+        );
+
+        // State 0 (Released)
+        GVariantBuilder options_builder2;
+        g_variant_builder_init(&options_builder2, G_VARIANT_TYPE_VARDICT);
+
+        g_dbus_connection_call(
+            connection,
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.RemoteDesktop",
+            "NotifyKeyboardKeysym",
+            g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder2, keysym, 0),
+            nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr, nullptr
+        );
     }
 };
 

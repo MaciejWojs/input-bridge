@@ -11,6 +11,15 @@ const __dirname = path.dirname(__filename);
  */
 export interface IInputBridge {
     /**
+     * Asynchronously initializes the native input bridge.
+     * On Linux (Wayland), this requests a RemoteDesktop portal session and waits
+     * for the user to grant permission. Returns a resolved Promise on success,
+     * or rejects if the initialization times out (10s) or is denied.
+     * On Windows, it resolves immediately.
+     */
+    init(): Promise<void>;
+
+    /**
      * Queues a relative mouse movement.
      * 
      * @param x - The relative movement on the X axis.
@@ -228,6 +237,10 @@ export class InputBridge implements IInputBridge {
     constructor(options?: InputBridgeOptions) {
         this.nativeBridge = new native.InputBridge();
         this.autoFlush = options?.autoFlush ?? false;
+    }
+
+    async init(): Promise<void> {
+        return this.nativeBridge.init();
     }
 
     moveMouseRelative(x: number, y: number): void { 

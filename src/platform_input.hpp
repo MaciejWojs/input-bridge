@@ -32,6 +32,8 @@ class IPlatformInput {
     public:
     virtual ~IPlatformInput() = default;
 
+    virtual bool Initialize(std::string& error_msg) { return true; }
+
     void SetLogCallback(std::function<void(const std::string&)> cb) {
         m_log = cb;
     }
