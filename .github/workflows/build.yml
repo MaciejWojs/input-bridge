@@ -2,16 +2,17 @@ name: Build and Publish
 
 on:
   push:
+    branches:
+      - main
     tags:
-      - 'v*' 
+      - 'v*'
 
 jobs:
   build-prebuilds:
     name: Build Prebuilds
     strategy:
       matrix:
-        # os: [ubuntu-latest, windows-latest]
-        os: [ windows-latest]
+        os: [ubuntu-20.04, windows-latest]
     runs-on: ${{ matrix.os }}
     
     steps:
@@ -22,9 +23,9 @@ jobs:
         with:
           bun-version: latest
 
-      # - name: install linux dependencies
-      #   if: runner.os == 'Linux'
-      #   run: sudo apt update && sudo apt install -y build-essential pkg-config libglib2.0-dev libpipewire-0.3-dev libspa-0.2-dev libsystemd-dev
+      - name: install linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt update && sudo apt install -y build-essential pkg-config libglib2.0-dev libxkbcommon-dev libsystemd-dev
 
       - name: Install Dependencies
         run: bun install --frozen-lockfile --ignore-scripts

@@ -13,6 +13,11 @@ class PlatformInputWin : public IPlatformInput {
         m_winInputs.reserve(1024);
     }
 
+    bool Initialize(std::string& error_msg) override {
+        // Windows input injection generally does not require session authorization
+        return true;
+    }
+
     void MoveMouseRelative(int32_t x, int32_t y) override {
         Log("PlatformInputWin: MoveMouseRelative x=" + std::to_string(x) + " y=" + std::to_string(y));
 

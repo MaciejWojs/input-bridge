@@ -40,11 +40,11 @@
             "src/linux/platform_input_linux.cpp"
           ],
           "cflags_cc": [
-            "<!@(pkg-config --cflags gio-2.0 gio-unix-2.0 glib-2.0 gobject-2.0)"
+            "<!@(pkg-config --cflags gio-2.0 gio-unix-2.0 glib-2.0 gobject-2.0 xkbcommon)"
           ],
           "libraries": [
-            "<!@(pkg-config --libs gio-2.0 gio-unix-2.0 glib-2.0 gobject-2.0)"
-          ]
+            "<!@(pkg-config --libs gio-2.0 gio-unix-2.0 glib-2.0 gobject-2.0 xkbcommon)"
+          ],
         }],
         ["OS!='win' and OS!='linux'", {
           "sources": [
