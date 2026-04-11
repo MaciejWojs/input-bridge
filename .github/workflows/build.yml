@@ -9,6 +9,7 @@ on:
 
 jobs:
   build-prebuilds:
+    if: github.ref_type == 'tag' && github.event.base_ref == 'refs/heads/main'
     name: Build Prebuilds
     strategy:
       matrix:
