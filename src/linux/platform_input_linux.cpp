@@ -1,6 +1,8 @@
 #include "../platform_input.hpp"
+#include "../key_translator.hpp"
 #include <iostream>
 #include <string>
+#include <cstdio>
 #include <gio/gio.h>
 #include <thread>
 #include <atomic>
@@ -337,19 +339,26 @@ class PlatformInputLinux : public IPlatformInput {
         g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
 
         uint32_t state = down ? 1 : 0;
-        
-        // --- PROSTA TRANSLACJA (TYMCZASOWA) ---
-        // Portal zakłada na wejściu kody klawiszy EVDEV xkb (Linux Evdev scancodes minus offset 8).
-        // Załóżmy, że z Node.js idzie kod typu ASCII lub kod Windowsowy.
-        // Jeśli keyCode z JS odpowiada standardowmu ASCII (A=65, B=66) i ma być na Evdev:
-        // A (evdev 30), B (evdev 48), C (evdev 46) itd.
-        // Dla testowego "klikania", jeśli dostajemy 65 (A), musimy uderzyć z 30
-        uint32_t evdev_code = keyCode; 
-        
-        // Tylko przykładowe mapowanie do weryfikacji litery z testu, bo mapę kodów musisz przygotowac obok.
-        if (keyCode == 65 || keyCode == 'a' || keyCode == 'A') evdev_code = 30; // Litera A na klawiaturze QWERTY US
-        else if (keyCode == 66 || keyCode == 'b' || keyCode == 'B') evdev_code = 48; // Litera B
-        else if (keyCode == 67 || keyCode == 'c' || keyCode == 'C') evdev_code = 46; // Litera C
+        uint32_t evdev_code = 0;
+
+        // Sprawdzamy czy przyszło bitowe pole "Zostaw mnie, jestem z czystego portalu Linuksa"
+        if ((keyCode & FLAG_RAW_MASK) == FLAG_RAW_LINUX) {
+            evdev_code = keyCode & ~FLAG_RAW_MASK; 
+        } 
+        // Oraz "Jestem czystym kodem Windows i trzeba mnie przetłumaczyć na Linuksa bo tu pracuje moduł"
+        else if ((keyCode & FLAG_RAW_MASK) == FLAG_RAW_WINDOWS) {
+            evdev_code = KeyTranslator::WindowsToLinux(keyCode & ~FLAG_RAW_MASK);
+        }
+        // Domyślny przypadek wejściowy z biblioteki z Node.js (który w JS zawsze jest Windowsie Virtual-Key'em)
+        else {
+            evdev_code = KeyTranslator::WindowsToLinux(keyCode);
+        }
+
+        // Jeżeli translator nie znał tego klawisza, bezpiecznie odrzucamy próbę napisania "wiatru"
+        if (evdev_code == 0) {
+            std::cerr << "[DBUS WARN] Nierozpoznany kod klawisza: " << keyCode << ". Pomijam zastrzyk." << std::endl;
+            return;
+        }
 
         g_dbus_connection_call(
             connection,
@@ -365,6 +374,44 @@ class PlatformInputLinux : public IPlatformInput {
             nullptr,
             nullptr
         );
+    }
+
+    void TypeCharacter(char16_t charCode) override {
+        if (!is_session_ready) return;
+
+        // Sekwencja wprowadzania znaków Unicode za pomocą tzw. "Linux Hex Input" wspieranego natywnie w GTK / IBus / Wayland
+        // 1. Wciśnij i przytrzymaj lewy Ctrl (VK_LCONTROL 0xA2) + Shift (VK_LSHIFT 0xA0)
+        KeyPress(0xA2, true);
+        KeyPress(0xA0, true);
+
+        // 2. Wciśnij klawisz 'u' (VK_U 0x55) by zainicjować "Unicode Mode"
+        KeyPress(0x55, true);
+        KeyPress(0x55, false);
+
+        // 3. Puść modyfikatory
+        KeyPress(0xA0, false);
+        KeyPress(0xA2, false);
+
+        // 4. Przekonwertuj kod Unicode do formy tekstowej szesnastkowej (np. char16_t dla 'ą' = 0x0105)
+        char hex[10];
+        std::snprintf(hex, sizeof(hex), "%x", (uint32_t)charCode);
+
+        // 5. Wklepuj po kolei litery / cyfry z HEX jako "normalne klawisze" klawiatury standardem Windows'owym
+        for (int i = 0; hex[i] != '\0'; i++) {
+            int32_t vk = 0;
+            if (hex[i] >= '0' && hex[i] <= '9') vk = 0x30 + (hex[i] - '0');
+            else if (hex[i] >= 'a' && hex[i] <= 'f') vk = 0x41 + (hex[i] - 'a');
+            else if (hex[i] >= 'A' && hex[i] <= 'F') vk = 0x41 + (hex[i] - 'A');
+            
+            if (vk != 0) {
+                KeyPress(vk, true);
+                KeyPress(vk, false);
+            }
+        }
+
+        // 6. Zatwierdź wprowadzony ciąg HEX za pomocą klawisza Enter (VK_RETURN 0x0D) i patrz jak tworzy się chiński znaczek lub Polskie 'ć'!
+        KeyPress(0x0D, true);
+        KeyPress(0x0D, false);
     }
 };
 
