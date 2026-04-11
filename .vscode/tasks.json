@@ -9,7 +9,12 @@
                 "command": "rm -rf build dist prebuilds maciejwojs-input-bridge-*.tgz playground/input_bridge_addon.node",
             },
             "windows": {
-                "command": "rmdir /s /q build && rmdir /s /q dist && rmdir /s /q prebuilds && del maciejwojs-input-bridge-*.tgz",
+                "command": "powershell",
+                "args": [
+                    "-NoProfile",
+                    "-Command",
+                    "Remove-Item -Recurse -Force build,dist,prebuilds,playground/input_bridge_addon.node,maciejwojs-input-bridge-*.tgz -ErrorAction SilentlyContinue"
+                ]
             },
             "presentation": {
                 "reveal": "silent",
@@ -19,7 +24,7 @@
             "group": "build",
             "icon": {
                 "id": "trashcan",
-                "color": "terminal.ansiRed" 
+                "color": "terminal.ansiRed"
             }
         },
         {
@@ -27,7 +32,9 @@
             "detail": "Compiles TypeScript types. Does not build the native addon.",
             "type": "shell",
             "command": "bun run build",
-            "problemMatcher": ["$tsc"],
+            "problemMatcher": [
+                "$tsc"
+            ],
             "group": "build",
             "icon": {
                 "id": "gear"
@@ -63,7 +70,10 @@
         {
             "label": "prepare",
             "detail": "Prepares the environment for building. (cleanup+build+rebuild)",
-            "dependsOn": ["cleanup", "make addon and compile types"],
+            "dependsOn": [
+                "cleanup",
+                "make addon and compile types"
+            ],
             "dependsOrder": "sequence",
             "hide": true,
             "group": "build"
@@ -71,7 +81,10 @@
         {
             "label": "make addon and compile types",
             "detail": "Builds the native addon and compiles TypeScript types.",
-            "dependsOn": ["build", "rebuild"],
+            "dependsOn": [
+                "build",
+                "rebuild"
+            ],
             "dependsOrder": "parallel",
             "hide": true,
             "group": "build"
@@ -81,13 +94,16 @@
             "detail": "Packs the module into a tarball using bun. Depends on prepare and prebuild to ensure everything is up to date.",
             "type": "shell",
             "command": "bun pm pack",
-            "dependsOn": ["prepare", "prebuild"],
+            "dependsOn": [
+                "prepare",
+                "prebuild"
+            ],
             "dependsOrder": "sequence",
             "presentation": {
                 "reveal": "always",
                 "clear": true
             },
-             "icon": {
+            "icon": {
                 "id": "package"
             },
             "group": "build"
@@ -97,7 +113,9 @@
             "detail": "Runs the playground script. Depends on prepare to ensure the addon is built and ready.",
             "type": "shell",
             "command": "cp ${workspaceFolder}/build/Release/input_bridge_addon.node ${workspaceFolder}/playground && bun run playground",
-            "dependsOn": ["prepare"],
+            "dependsOn": [
+                "prepare"
+            ],
             "options": {
                 "cwd": "${workspaceFolder}"
             },
