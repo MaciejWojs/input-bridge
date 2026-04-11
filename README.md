@@ -5,9 +5,10 @@ Native Node.js addon for simulating hardware input events (mouse movement, click
 ## Current state
 
 - Windows backend is implemented using the `SendInput` API, supporting batched event execution for high performance.
+- Linux backend is implemented using the Freedesktop `RemoteDesktop` portal on Wayland, requesting authorization via D-Bus before injecting mouse and keyboard events.
+- Optional `libxkbcommon` support is loaded at runtime to map Unicode characters for Linux text input.
 - Features a cross-platform `InputQueue` that buffers input events.
 - Includes a movement decimation algorithm (`optimizeMouseMovesRelative` / `optimizeMouseMovesAbsolute`) to filter out redundant micro-movements, vastly reducing native API call overhead.
-- Linux backend is currently a stub (planned implementation via `uinput` or Wayland/X11 tools).
 - Runtime loading uses `node-gyp-build`, so local build and `prebuilds/` binaries are both supported.
 
 ## Install
@@ -45,7 +46,7 @@ Scripts are configured to run `node-gyp` via `node-gyp` internally and build Typ
 Recommended backend mapping:
 
 - Windows: `SendInput` (already in place)
-- Linux: `uinput`, `XTest` (X11) or `ydotool` (Wayland)
+- Linux: `RemoteDesktop` portal on Wayland (currently implemented), or `uinput` / `XTest` (X11) / `ydotool` (Wayland) for alternate environments
 - macOS: `CGEventCreateMouseEvent` and `CoreGraphics` APIs
 
 Practical architecture:
