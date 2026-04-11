@@ -2,6 +2,7 @@
 #include "../key_translator.hpp"
 #include <iostream>
 #include <string>
+#include <sstream>
 #include <cstdio>
 #include <gio/gio.h>
 #include <thread>
@@ -9,6 +10,32 @@
 #include <mutex>
 #include <condition_variable>
 #include <chrono>
+#include <dlfcn.h>
+
+using xkb_utf32_to_keysym_t = uint32_t(*)(uint32_t);
+
+static std::string ToHex(uint32_t value) {
+    std::ostringstream ss;
+    ss << "0x" << std::hex << std::uppercase << value;
+    return ss.str();
+}
+static void* xkb_handle = nullptr;
+static xkb_utf32_to_keysym_t xkb_utf32_to_keysym_func = nullptr;
+static bool xkb_common_initialized = false;
+
+static void InitOptionalXkbCommon() {
+    if (xkb_common_initialized) return;
+    xkb_common_initialized = true;
+
+    xkb_handle = dlopen("libxkbcommon.so.0", RTLD_LAZY | RTLD_LOCAL);
+    if (!xkb_handle) {
+        xkb_handle = dlopen("libxkbcommon.so", RTLD_LAZY | RTLD_LOCAL);
+    }
+
+    if (xkb_handle) {
+        xkb_utf32_to_keysym_func = reinterpret_cast<xkb_utf32_to_keysym_t>(dlsym(xkb_handle, "xkb_utf32_to_keysym"));
+    }
+}
 
 class PlatformInputLinux : public IPlatformInput {
     private:
@@ -23,6 +50,62 @@ class PlatformInputLinux : public IPlatformInput {
     
     std::mutex session_mutex;
     std::condition_variable session_cv;
+
+    static bool SendKeyboardKeycode(GDBusConnection* connection, const std::string& handle, uint32_t evdev, bool down) {
+        GVariantBuilder options_builder;
+        g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
+
+        uint32_t state = down ? 1 : 0;
+        GError* error = nullptr;
+        GVariant* result = g_dbus_connection_call_sync(
+            connection,
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.RemoteDesktop",
+            "NotifyKeyboardKeycode",
+            g_variant_new("(oa{sv}iu)", handle.c_str(), &options_builder, evdev, state),
+            nullptr,
+            G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            nullptr,
+            &error
+        );
+
+        if (error) {
+            std::cerr << "Failed to send NotifyKeyboardKeycode: " << error->message << std::endl;
+            g_error_free(error);
+            if (result) {
+                g_variant_unref(result);
+            }
+            return false;
+        }
+
+        if (result) {
+            g_variant_unref(result);
+        }
+        return true;
+    }
+
+    static bool SendAltGrKeycodeSequence(GDBusConnection* connection, const std::string& handle, uint32_t keycode, bool shift) {
+        uint32_t altGr = 100; // Right Alt / AltGr
+        uint32_t shiftCode = 42; // Left Shift
+
+        if (!SendKeyboardKeycode(connection, handle, altGr, true)) return false;
+        if (shift && !SendKeyboardKeycode(connection, handle, shiftCode, true)) {
+            SendKeyboardKeycode(connection, handle, altGr, false);
+            return false;
+        }
+
+        bool ok = SendKeyboardKeycode(connection, handle, keycode, true)
+            && SendKeyboardKeycode(connection, handle, keycode, false);
+
+        if (shift) {
+            ok = ok && SendKeyboardKeycode(connection, handle, shiftCode, false);
+        }
+
+        ok = ok && SendKeyboardKeycode(connection, handle, altGr, false);
+        return ok;
+    }
 
     static void OnPortalResponse(GDBusConnection *connection, const gchar *sender_name,
                                  const gchar *object_path, const gchar *interface_name,
@@ -169,7 +252,7 @@ class PlatformInputLinux : public IPlatformInput {
             "Response",
             nullptr, // object path będzie znany po wywołaniu CreateSession, ale chwytamy globalnie
             nullptr,
-            G_DBUS_SIGNAL_FLAGS_NO_MATCH_RULE,
+            G_DBUS_SIGNAL_FLAGS_NONE,
             OnPortalResponse,
             this,
             nullptr
@@ -358,50 +441,66 @@ class PlatformInputLinux : public IPlatformInput {
         );
     }
 
-    void TypeCharacter(char16_t charCode) override {
-        if (!is_session_ready) return;
+   void TypeCharacter(char16_t charCode) override {
+    if (!is_session_ready) return;
 
-        // Zgodnie ze specyfikacją X11 / Wayland RemoteDesktop:
-        // Każdy znak Unicode można przetłumaczyć na Keysym poprzez dodanie 0x01000000.
-        // Nawet jeśli niektóre znaki mają dedykowane, nazwane kody w specyfikacji XKB (np. ś -> 0x1B6),
-        // kompozytory Wayland (np. Mutter) najstabilniej przyjmują absolutny U-Keysym, 
-        // dzięki czemu nie jest wymagana zależność od zewnętrznej biblioteki libxkbcommon-dev 
-        // ani zmaganie o odpowiedni stan układu klawiatury użytkownika.
-        
-        int32_t keysym = charCode;
-        if (charCode >= 0x0080 || charCode < 0x0020) { 
-            // Dla czystego ASCII pomijamy dodawanie maski. Dla wszystkiego innego - bezwzględny uniksowy keysym U.
-            keysym = charCode | 0x01000000;
+    uint32_t codepoint = static_cast<uint32_t>(charCode);
+    uint32_t keysym = 0;
+
+    // 1. Próba mapowania przez libxkbcommon (jeśli załadowane)
+    InitOptionalXkbCommon();
+    if (xkb_utf32_to_keysym_func) {
+        std::cout << "Mapping char '" << (char)charCode << "' (U+" << ToHex(codepoint) << ") using xkbcommon..." << std::endl;
+        keysym = xkb_utf32_to_keysym_func(codepoint);
+    }
+
+    // 2. Fallback dla standardowego Unicode Keysym (jeśli xkb zawiedzie)
+    if (keysym == 0) {
+        if (codepoint >= 0x20 && codepoint <= 0x7E) {
+            keysym = codepoint; // ASCII
+        } else if (codepoint > 0x7E) {
+            keysym = codepoint | 0x01000000; // Standardowy prefiks Unicode w X11
+        } else {
+            // Obsługa klawiszy kontrolnych
+            if (codepoint == 0x0D) keysym = 0xFF0D;      // Enter
+            else if (codepoint == 0x08) keysym = 0xFF08; // Backspace
+            else if (codepoint == 0x09) keysym = 0xFF09; // Tab
+            else return;
         }
+    }
 
+    // Funkcja pomocnicza do wysyłania synchronicznego
+    auto send_keysym_sync = [&](bool down) {
         GVariantBuilder options_builder;
         g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
-
-        // State 1 (Pressed)
-        g_dbus_connection_call(
+        
+        GError* error = nullptr;
+        // Używamy CALL_SYNC, aby zachować kolejność znaków
+        GVariant* result = g_dbus_connection_call_sync(
             connection,
             "org.freedesktop.portal.Desktop",
             "/org/freedesktop/portal/desktop",
             "org.freedesktop.portal.RemoteDesktop",
             "NotifyKeyboardKeysym",
-            g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder, keysym, 1),
-            nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr, nullptr
+            g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder, (int32_t)keysym, down ? 1 : 0),
+            nullptr,
+            G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            nullptr,
+            &error
         );
 
-        // State 0 (Released)
-        GVariantBuilder options_builder2;
-        g_variant_builder_init(&options_builder2, G_VARIANT_TYPE_VARDICT);
+        if (error) {
+            std::cerr << "[DBUS ERR] TypeCharacter: " << error->message << std::endl;
+            g_error_free(error);
+        }
+        if (result) g_variant_unref(result);
+    };
 
-        g_dbus_connection_call(
-            connection,
-            "org.freedesktop.portal.Desktop",
-            "/org/freedesktop/portal/desktop",
-            "org.freedesktop.portal.RemoteDesktop",
-            "NotifyKeyboardKeysym",
-            g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder2, keysym, 0),
-            nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr, nullptr
-        );
-    }
+    // Sekwencja musi być atomowa dla każdego znaku
+    send_keysym_sync(true);  // Press
+    send_keysym_sync(false); // Release
+}
 };
 
 std::unique_ptr<IPlatformInput> CreatePlatformInput() {
