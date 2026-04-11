@@ -5,10 +5,10 @@
             "label": "cleanup",
             "type": "shell",
             "linux": {
-                "command": "rm -rf build dist maciejwojs-input-bridge-*.tgz"
+                "command": "rm -rf build dist prebuilds maciejwojs-input-bridge-*.tgz playground/input_bridge_addon.node",
             },
             "windows": {
-                "command": "rmdir /s /q build dist && del maciejwojs-input-bridge-*.tgz"
+                "command": "rmdir /s /q build && rmdir /s /q dist && rmdir /s /q prebuilds && del maciejwojs-input-bridge-*.tgz",
             },
             "presentation": {
                 "reveal": "silent",
@@ -17,7 +17,6 @@
             },
             "group": "build"
         },
-        
         {
             "label": "build",
             "type": "shell",
