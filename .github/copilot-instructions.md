@@ -135,6 +135,47 @@ This is a low-level input system.
 - Extend platform support via backend interface, not API changes.
 - Prefer clarity over abstraction in native code.
 - Write comments in English only.
+- Ensure exported package files expose public APIs with TypeScript doc comments (tsdoc).
+
+## API documentation rules (TS-DOC REQUIRED)
+
+All exported public APIs MUST have full TSDoc comments.
+
+This applies to:
+- exported interfaces
+- exported functions
+- exported classes
+- public methods
+- public types and interfaces exposed from `lib/`
+
+### Requirements
+
+- Every exported symbol must include TSDoc (`/** ... */`)
+- TSDoc must describe:
+  - purpose
+  - parameters (`@param`)
+  - return value (`@returns`) if applicable
+  - platform differences if relevant (Windows/Linux behavior)
+- No undocumented exported API is allowed
+
+### Example
+
+```ts
+/**
+ * Queues a mouse button press or release.
+ * 
+ * @param button - The mouse button (0 = left, 1 = right, 2 = middle).
+ * @param down - `true` to press the button, `false` to release.
+ * 
+ * @example
+ * ```typescript
+ * bridge.mouseClick(0, true);  // press left mouse button
+ * bridge.mouseClick(0, false); // release left mouse button
+ * bridge.flush();
+ * ```
+ */
+mouseClick(button: number, down: boolean): void;
+```
 
 ---
 
