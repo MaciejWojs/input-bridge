@@ -10,12 +10,34 @@
 #undef KeyRelease
 
 #include <unistd.h>
+#include <dlfcn.h>
 
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
+#include <vector>
+#include <map>
+
+using xkb_utf32_to_keysym_t = uint32_t(*)(uint32_t);
+static void* xkb_handle = nullptr;
+static xkb_utf32_to_keysym_t xkb_utf32_to_keysym_func = nullptr;
+static bool xkb_common_initialized = false;
+
+static void InitOptionalXkbCommon() {
+    if (xkb_common_initialized) return;
+    xkb_common_initialized = true;
+
+    xkb_handle = dlopen("libxkbcommon.so.0", RTLD_LAZY | RTLD_LOCAL);
+    if (!xkb_handle) {
+        xkb_handle = dlopen("libxkbcommon.so", RTLD_LAZY | RTLD_LOCAL);
+    }
+
+    if (xkb_handle) {
+        xkb_utf32_to_keysym_func = reinterpret_cast<xkb_utf32_to_keysym_t>(dlsym(xkb_handle, "xkb_utf32_to_keysym"));
+    }
+}
 
 namespace {
 
@@ -132,6 +154,62 @@ KeySym CharToKeySym(char32_t cp, bool& needShift) {
 class X11PlatformInput : public IPlatformInput {
 private:
     Display* m_display = nullptr;
+    std::vector<KeyCode> m_scratchCodes;
+    std::vector<KeySym> m_scratchSyms;
+    size_t m_scratchIndex = 0;
+    bool m_scratchInitialized = false;
+
+    void InitScratch() {
+        if (m_scratchInitialized) return;
+        m_scratchInitialized = true;
+
+        int min_keycode = 0, max_keycode = 0;
+        XDisplayKeycodes(m_display, &min_keycode, &max_keycode);
+
+        for (KeyCode i = max_keycode; i >= min_keycode; --i) {
+            int keysyms_per_keycode = 0;
+            KeySym* ks = XGetKeyboardMapping(m_display, i, 1, &keysyms_per_keycode);
+            bool empty = true;
+            if (ks) {
+                for (int k = 0; k < keysyms_per_keycode; ++k) {
+                    if (ks[k] != NoSymbol) { empty = false; break; }
+                }
+                XFree(ks);
+            }
+            if (empty) {
+                m_scratchCodes.push_back(i);
+                m_scratchSyms.push_back(NoSymbol);
+            }
+        }
+    }
+
+    KeyCode GetScratchForSym(KeySym sym) {
+        InitScratch();
+        if (m_scratchCodes.empty()) return 0;
+
+        // Re-use an existing scratch key if already mapped
+        for (size_t i = 0; i < m_scratchCodes.size(); ++i) {
+            if (m_scratchSyms[i] == sym) {
+                return m_scratchCodes[i];
+            }
+        }
+
+        // Allocate a scratch key from the rotating pool
+        size_t idx = m_scratchIndex;
+        m_scratchIndex = (m_scratchIndex + 1) % m_scratchCodes.size();
+
+        KeyCode code = m_scratchCodes[idx];
+        m_scratchSyms[idx] = sym;
+
+        KeySym newSyms[2] = { sym, sym }; 
+        XChangeKeyboardMapping(m_display, code, 2, newSyms, 1);
+        XSync(m_display, False);
+
+        // Allow target applications some time to process the mapping notify event
+        usleep(1000 * 5); // 5ms
+
+        return code;
+    }
 
     KeyCode ResolveKeycodeFromEvdevInput(int32_t keyCode) const {
         int32_t evdevCode = 0;
@@ -175,6 +253,19 @@ public:
 
     ~X11PlatformInput() override {
         if (m_display != nullptr) {
+            // Restore scratch variables
+            if (m_scratchInitialized) {
+                for (size_t i = 0; i < m_scratchCodes.size(); ++i) {
+                    if (m_scratchSyms[i] != NoSymbol) {
+                        KeySym emptySyms[2] = { NoSymbol, NoSymbol };
+                        XChangeKeyboardMapping(m_display, m_scratchCodes[i], 2, emptySyms, 1);
+                    }
+                }
+                if (!m_scratchCodes.empty()) {
+                    XSync(m_display, False);
+                }
+            }
+
             XCloseDisplay(m_display);
             m_display = nullptr;
         }
@@ -232,31 +323,83 @@ public:
     }
 
     void TypeCharacter(char16_t charCode) override {
-        char32_t cp = static_cast<char32_t>(charCode);
+        uint32_t codepoint = static_cast<uint32_t>(charCode);
+        KeySym keySym = 0;
 
-        bool needShift = false;
-        KeySym keySym = CharToKeySym(cp, needShift);
-        if (keySym == NoSymbol) {
-            fprintf(stderr, "[X11 WARN] Could not map character U+%04X\n", static_cast<unsigned int>(cp));
-            return;
+        // 1. Try mapping with libxkbcommon (if loaded)
+        InitOptionalXkbCommon();
+        if (xkb_utf32_to_keysym_func) {
+            keySym = xkb_utf32_to_keysym_func(codepoint);
+        }
+
+        // 2. Fallback to the standard Unicode Keysym (if xkb fails)
+        if (keySym == 0) {
+            if (codepoint >= 0x20 && codepoint <= 0x7E) {
+                keySym = codepoint; // ASCII
+            } else if (codepoint > 0x7E) {
+                keySym = codepoint | 0x01000000; // Standard Unicode prefix in X11
+            } else {
+                if (codepoint == 0x0D) keySym = 0xFF0D;      // Enter
+                else if (codepoint == 0x08) keySym = 0xFF08; // Backspace
+                else if (codepoint == 0x09) keySym = 0xFF09; // Tab
+                else return;
+            }
         }
 
         KeyCode keyCode = XKeysymToKeycode(m_display, keySym);
-        if (keyCode == 0) {
-            fprintf(stderr, "[X11 WARN] No keycode for character U+%04X\n", static_cast<unsigned int>(cp));
-            return;
+        bool needShift = false;
+        bool mappedToScratch = false;
+
+        int keysyms_per_keycode = 0;
+        KeySym* syms = nullptr;
+        if (keyCode != 0) {
+            syms = XGetKeyboardMapping(m_display, keyCode, 1, &keysyms_per_keycode);
         }
 
-        KeyCode shiftCode = XKeysymToKeycode(m_display, XK_Shift_L);
-        if (needShift && shiftCode != 0) {
-            XTestFakeKeyEvent(m_display, shiftCode, True, CurrentTime);
+        bool directMatch = false;
+        if (syms) {
+            if (keysyms_per_keycode > 0 && syms[0] == keySym) {
+                directMatch = true;
+            } else if (keysyms_per_keycode > 1 && syms[1] == keySym) {
+                directMatch = true;
+                needShift = true;
+            }
+            XFree(syms);
+        }
+
+        if (!directMatch) {
+            // Kod przypisany w układzie (lub jego brak) wymagałby wciskania AltGr (Level 3) lub 
+            // kombinacji grup. Aby tego uniknąć (co jest problematyczne z XTest),
+            // przypiszemy znak bezpośrednio (jako bazę bez modyfikatorów) 
+            // pod nieużywany, "pusty" klawisz systemowy na czas wciśnięcia.
+            // Bierzemy klawisz z puli i nie zwracamy go aż do zamknięcia addonu, 
+            // aby uniknąć błędów wyścigów w target aplikacji
+            keyCode = GetScratchForSym(keySym);
+            needShift = false; // Został przypisany wprost!
+            
+            if (keyCode == 0) {
+                fprintf(stderr, "[X11 WARN] Brak pustego przycisku dla znaku U+%04X\n", codepoint);
+                return;
+            }
+            mappedToScratch = true;
+        }
+
+        KeyCode shiftCode = 0;
+        if (needShift) {
+            shiftCode = XKeysymToKeycode(m_display, XK_Shift_L);
+            if (shiftCode) {
+                XTestFakeKeyEvent(m_display, shiftCode, True, CurrentTime);
+                XSync(m_display, False);
+            }
         }
 
         XTestFakeKeyEvent(m_display, keyCode, True, CurrentTime);
         XTestFakeKeyEvent(m_display, keyCode, False, CurrentTime);
+        XSync(m_display, False);
 
-        if (needShift && shiftCode != 0) {
+        if (shiftCode) {
             XTestFakeKeyEvent(m_display, shiftCode, False, CurrentTime);
+            XSync(m_display, False);
         }
     }
 
