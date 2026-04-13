@@ -128,6 +128,28 @@
                 "id": "play"
             },
             "group": "build"
+        },
+        {
+            "label": "playground (X11)",
+            "detail": "Rebuilds the addon with X11 backend and runs the playground script.",
+            "type": "shell",
+            "command": "use_x11_backend=1 bun rebuild && cp ${workspaceFolder}/build/Release/input_bridge_addon.node ${workspaceFolder}/playground && bun run playground",
+            "dependsOn": [
+                "build"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "presentation": {
+                "reveal": "always",
+                "clear": true,
+                "focus": true
+            },
+            "icon": {
+                "id": "play",
+                "color": "terminal.ansiBlue"
+            },
+            "group": "build"
         }
     ]
 }
