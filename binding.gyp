@@ -23,7 +23,7 @@
       ],
 
       "conditions": [
-        ["OS=='linux' and use_x11_backend=='1'", {
+        ["OS=='linux' and use_x11_backend==1", {
           "defines": [
             "USE_X11_BACKEND"
           ],
@@ -33,7 +33,7 @@
           ]
         }],
 
-        ["OS=='linux' and use_x11_backend!='1'", {
+        ["OS=='linux' and use_x11_backend!=1", {
           "cflags_cc": [
             "<!@(pkg-config --cflags gio-2.0 gio-unix-2.0 glib-2.0 gobject-2.0 xkbcommon)"
           ],
