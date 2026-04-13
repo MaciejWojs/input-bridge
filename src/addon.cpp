@@ -10,7 +10,7 @@
 typedef PlatformInputWin PlatformInputImpl;
 #elif defined(__linux__)
 #ifdef USE_X11_BACKEND
-#include "x11/platform_input_x11.cpp"
+#include "linux/platform_input_x11.cpp"
 typedef X11PlatformInput PlatformInputImpl;
 #else
 #include "linux/platform_input_linux.cpp"
