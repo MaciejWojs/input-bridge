@@ -24,7 +24,9 @@
     "dist",
     "binding.gyp",
     "src",
-    "prebuilds"
+    "prebuilds",
+    "README.md",
+    "CHANGELOG.md"
   ],
   "module": "dist/index.js",
   "type": "module",
