@@ -502,7 +502,3 @@ class PlatformInputLinux : public IPlatformInput {
     send_keysym_sync(false); // Release
 }
 };
-
-std::unique_ptr<IPlatformInput> CreatePlatformInput() {
-    return std::make_unique<PlatformInputLinux>();
-}

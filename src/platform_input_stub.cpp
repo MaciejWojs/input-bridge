@@ -23,7 +23,3 @@ class PlatformInputStub : public IPlatformInput {
         // NotImplemented
     }
 };
-
-std::unique_ptr<IPlatformInput> CreatePlatformInput() {
-    return std::make_unique<PlatformInputStub>();
-}

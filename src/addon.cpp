@@ -5,6 +5,26 @@
 #include <string>
 #include "platform_input.hpp"
 
+#if defined(_WIN32)
+#include "win/platform_input_win.cpp"
+typedef PlatformInputWin PlatformInputImpl;
+#elif defined(__linux__)
+#ifdef USE_X11_BACKEND
+#include "x11/platform_input_x11.cpp"
+typedef X11PlatformInput PlatformInputImpl;
+#else
+#include "linux/platform_input_linux.cpp"
+typedef PlatformInputLinux PlatformInputImpl;
+#endif
+#else
+#include "platform_input_stub.cpp"
+typedef PlatformInputStub PlatformInputImpl;
+#endif
+
+std::unique_ptr<IPlatformInput> CreatePlatformInput() {
+    return std::make_unique<PlatformInputImpl>();
+}
+
 class InputBridge : public Napi::ObjectWrap<InputBridge> {
     public:
     static Napi::Object Init(Napi::Env env, Napi::Object exports) {
