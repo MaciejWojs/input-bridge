@@ -5,6 +5,10 @@
 #include <X11/keysym.h>
 #include <X11/extensions/XTest.h>
 
+// Fix for X11 macro pollution
+#undef KeyPress
+#undef KeyRelease
+
 #include <unistd.h>
 
 #include <cctype>
@@ -87,7 +91,6 @@ KeySym CharToKeySym(char32_t cp, bool& needShift) {
         needShift = true;
         return static_cast<KeySym>(cp + 32);
     }
-
     switch (cp) {
         case U' ': return XK_space;
         case U'\n': return XK_Return;
