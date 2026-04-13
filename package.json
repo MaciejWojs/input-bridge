@@ -46,12 +46,12 @@
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "@types/node": "^25.5.0",
+    "@types/node": "^25.6.0",
     "node-gyp": "^12.2.0",
     "prebuildify": "^6.0.1"
   },
   "peerDependencies": {
-    "typescript": "^5"
+    "typescript": "^6.0.2"
   },
   "dependencies": {
     "node-addon-api": "^8.7.0",
