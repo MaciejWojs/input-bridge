@@ -1,15 +1,19 @@
 # @maciejwojs/input-bridge
 
-Native Node.js addon for simulating hardware input events (mouse movement, clicks, keyboard events). Packages are published to NPM with provenance (OIDC) and include prebuilt binaries via GitHub Actions.
+Native Node.js addon for simulating hardware input events on Windows and Linux. The package exposes a single JavaScript API for mouse movement, clicks, keyboard events, scrolling, and typed text, with batched execution and optimization support.
 
-## Current state
+## Features
 
-- Windows backend is implemented using the `SendInput` API, supporting batched event execution for high performance.
-- Linux backend is implemented using the Freedesktop `RemoteDesktop` portal on Wayland, requesting authorization via D-Bus before injecting mouse and keyboard events.
-- Optional `libxkbcommon` support is loaded at runtime to map Unicode characters for Linux text input.
-- Features a cross-platform `InputQueue` that buffers input events.
-- Includes a movement decimation algorithm (`optimizeMouseMovesRelative` / `optimizeMouseMovesAbsolute`) to filter out redundant micro-movements, vastly reducing native API call overhead.
-- Runtime loading uses `node-gyp-build`, so local build and `prebuilds/` binaries are both supported.
+- Windows backend using the native `SendInput` API
+- Linux backend using the Freedesktop `RemoteDesktop` portal on Wayland
+- Optional Linux X11 backend for environments where Wayland is unavailable
+- Batched event queue with explicit `flush()` execution
+- Relative and absolute mouse movement
+- Mouse button clicks and wheel scrolling
+- Raw keyboard events and typed Unicode text
+- DOM `KeyboardEvent.code` mapping via `keyPressDOM()`
+- Movement optimization via `optimizeMouseMovesRelative()` and `optimizeMouseMovesAbsolute()`
+- Optional native logger callback from the addon
 
 ## Install
 
@@ -17,51 +21,81 @@ Native Node.js addon for simulating hardware input events (mouse movement, click
 bun install
 ```
 
-## Local build
+## Quick start
 
-```bash
-bun run build # to compile TypeScript
-bun x node-gyp rebuild
+```ts
+import { InputBridge } from '@maciejwojs/input-bridge';
+
+const bridge = new InputBridge({ autoFlush: false });
+await bridge.init();
+
+bridge.moveMouseRelative(10, 0);
+bridge.mouseClick(0, true);
+bridge.mouseClick(0, false);
+bridge.flush();
 ```
 
-## Prebuilt binaries (prebuildify)
+## API overview
 
-Build prebuild for current platform:
+- `init()` - initializes the native bridge and requests permissions on Linux
+- `moveMouseRelative(x, y)` - queue a relative mouse movement
+- `moveMouseAbsolute(x, y)` - queue an absolute mouse movement
+- `mouseClick(button, down)` - queue a mouse button press/release
+- `keyPress(keyCode, down)` - queue a raw keyboard press/release
+- `keyPressDOM(domCode, down)` - queue a scan-code based key event from DOM `KeyboardEvent.code`
+- `scrollMouse(delta)` - queue a mouse wheel scroll event
+- `typeString(text)` - queue typed Unicode text
+- `optimizeMouseMovesRelative(distanceThreshold)` - reduce buffered relative move events
+- `optimizeMouseMovesAbsolute(distanceThreshold)` - reduce buffered absolute move events
+- `toggleOptimization()` - enable/disable internal mouse move optimization
+- `flush()` - execute all queued input events
+- `setLogger(callback)` - receive native backend log messages
+
+## Build and development
+
+```bash
+bun run build
+bun run rebuild
+```
+
+To verify the native addon loads successfully:
+
+```bash
+bun run test:load
+```
+
+## Prebuilt binaries
+
+Create a prebuilt binary for the current platform:
 
 ```bash
 bun run prebuildify
 ```
 
-Build prebuilds for selected platforms:
+Create prebuilt binaries for Windows, Linux, and macOS targets:
 
 ```bash
 bun run prebuildify:all
 ```
 
-Output goes to `prebuilds/` and is loaded automatically by `lib/index.ts`.
-Scripts are configured to run `node-gyp` via `node-gyp` internally and build TypeScript beforehand.
+Built artifacts are placed in `prebuilds/` and loaded automatically by `lib/index.ts`.
 
-## How to add other systems / window managers
+## Supported platforms
 
-Recommended backend mapping:
+- `win32` - fully implemented with Windows `SendInput`
+- `linux` - supported on Wayland via the RemoteDesktop portal and optionally on X11 when built with the X11 backend
+- other OSes use the stub fallback if compiled, but native injection is only available on supported backends
 
-- Windows: `SendInput` (already in place)
-- Linux: `RemoteDesktop` portal on Wayland (currently implemented), or `uinput` / `XTest` (X11) / `ydotool` (Wayland) for alternate environments
-- macOS: `CGEventCreateMouseEvent` and `CoreGraphics` APIs
+## Project layout
 
-Practical architecture:
+- `lib/` - JavaScript API surface and wrapper exports
+- `src/addon.cpp` - N-API bridge implementation
+- `src/win/platform_input_win.cpp` - Windows backend
+- `src/linux/platform_input_linux.cpp` - Linux backend
+- `src/platform_input_stub.cpp` - fallback implementation
+- `src/platform_input.hpp` - shared backend interface and event queue
+- `binding.gyp` - native addon build configuration
 
-- Keep one JS API (`InputBridge`) for all OSes.
-- Keep one addon target in `binding.gyp`.
-- Keep per-platform backend in separate `.cpp` files and select in `binding.gyp` conditions.
-- Current split is:
-	- `src/addon.cpp` - shared N-API wrapper
-	- `src/win/platform_input_win.cpp` - Windows backend
-	- `src/linux/platform_input_linux.cpp` - Linux backend entry point
-	- `src/platform_input_stub.cpp` - fallback for other systems
-	- `src/platform_input.hpp` - common backend interface and `InputQueue` implementation
-- Unsupported combinations default to a stub fallback implementing the interface.
+## Notes
 
-To add the next platform, create the backend file (for example `src/macos/platform_input_macos.cpp`), implement the `IPlatformInput` virtual methods (the `InputQueue` and batching mechanics will be handled automatically by the base classes), and add the file to the matching `binding.gyp` condition branch.
-
-This gives you one npm package with many prebuilt binaries and no user-side compile step.
+The repository is designed to keep the public JS API stable while allowing per-platform native backend extensions. The `InputBridge` wrapper always exposes the same methods regardless of the active backend.
