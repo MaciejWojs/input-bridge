@@ -164,7 +164,3 @@ class PlatformInputWin : public IPlatformInput {
         }
     }
 };
-
-std::unique_ptr<IPlatformInput> CreatePlatformInput() {
-    return std::make_unique<PlatformInputWin>();
-}
