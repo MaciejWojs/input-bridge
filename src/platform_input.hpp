@@ -10,12 +10,17 @@
 #include <variant>
 #include <type_traits>
 
+enum class InputRoute {
+    Unicode,
+    Keyboard
+};
+
 struct MouseMoveRelative { int32_t x; int32_t y; };
 struct MouseMoveAbsolute { int32_t x; int32_t y; };
 struct MouseClick { int32_t button; bool down; };
-struct KeyPress { int32_t keyCode; bool down; };
+struct KeyPress { int32_t keyCode; bool down; InputRoute routedTo = InputRoute::Keyboard; };
 struct MouseScroll { int32_t delta; };
-struct TypeCharacter { char16_t charCode; };
+struct TypeCharacter { char16_t charCode; InputRoute routedTo = InputRoute::Unicode; };
 
 using InputEvent = std::variant<MouseMoveRelative, MouseMoveAbsolute, MouseClick, KeyPress, MouseScroll, TypeCharacter>;
 
@@ -92,7 +97,7 @@ class InputQueue {
     }
 
     void QueueKeyPress(int32_t keyCode, bool down) {
-        m_events.push_back(KeyPress{ keyCode, down });
+        m_events.push_back(KeyPress{ keyCode, down, InputRoute::Keyboard });
     }
 
     void QueueScrollMouse(int32_t delta) {
@@ -100,7 +105,7 @@ class InputQueue {
     }
 
     void QueueTypeCharacter(char16_t charCode) {
-        m_events.push_back(TypeCharacter{ charCode });
+        m_events.push_back(TypeCharacter{ charCode, InputRoute::Unicode });
     }
 
     private:

@@ -42,6 +42,7 @@ class PlatformInputLinux : public IPlatformInput {
     GDBusConnection* connection = nullptr;
     std::string session_handle;
     bool is_session_ready = false;
+    bool m_batchMode = false;
     
     GMainLoop* main_loop = nullptr;
     std::thread loop_thread;
@@ -332,6 +333,33 @@ class PlatformInputLinux : public IPlatformInput {
         GVariantBuilder options_builder;
         g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
 
+        if (m_batchMode) {
+            GError* error = nullptr;
+            GVariant* result = g_dbus_connection_call_sync(
+                connection,
+                "org.freedesktop.portal.Desktop",
+                "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.RemoteDesktop",
+                "NotifyPointerMotion",
+                g_variant_new("(oa{sv}dd)", session_handle.c_str(), &options_builder, (double)x, (double)y),
+                nullptr,
+                G_DBUS_CALL_FLAGS_NONE,
+                -1,
+                nullptr,
+                &error
+            );
+
+            if (error) {
+                std::cerr << "Failed to send NotifyPointerMotion: " << error->message << std::endl;
+                g_error_free(error);
+            }
+
+            if (result) {
+                g_variant_unref(result);
+            }
+            return;
+        }
+
         g_dbus_connection_call(
             connection,
             "org.freedesktop.portal.Desktop",
@@ -353,6 +381,33 @@ class PlatformInputLinux : public IPlatformInput {
 
         GVariantBuilder options_builder;
         g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
+
+        if (m_batchMode) {
+            GError* error = nullptr;
+            GVariant* result = g_dbus_connection_call_sync(
+                connection,
+                "org.freedesktop.portal.Desktop",
+                "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.RemoteDesktop",
+                "NotifyPointerMotionAbsolute",
+                g_variant_new("(oa{sv}udd)", session_handle.c_str(), &options_builder, 0, (double)x, (double)y),
+                nullptr,
+                G_DBUS_CALL_FLAGS_NONE,
+                -1,
+                nullptr,
+                &error
+            );
+
+            if (error) {
+                std::cerr << "Failed to send NotifyPointerMotionAbsolute: " << error->message << std::endl;
+                g_error_free(error);
+            }
+
+            if (result) {
+                g_variant_unref(result);
+            }
+            return;
+        }
 
         g_dbus_connection_call(
             connection,
@@ -380,6 +435,33 @@ class PlatformInputLinux : public IPlatformInput {
         uint32_t linux_button = 0x110; 
         if (button == 1) linux_button = 0x111;
         else if (button == 2) linux_button = 0x112;
+
+        if (m_batchMode) {
+            GError* error = nullptr;
+            GVariant* result = g_dbus_connection_call_sync(
+                connection,
+                "org.freedesktop.portal.Desktop",
+                "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.RemoteDesktop",
+                "NotifyPointerButton",
+                g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder, linux_button, state),
+                nullptr,
+                G_DBUS_CALL_FLAGS_NONE,
+                -1,
+                nullptr,
+                &error
+            );
+
+            if (error) {
+                std::cerr << "Failed to send NotifyPointerButton: " << error->message << std::endl;
+                g_error_free(error);
+            }
+
+            if (result) {
+                g_variant_unref(result);
+            }
+            return;
+        }
 
         g_dbus_connection_call(
             connection,
@@ -422,6 +504,33 @@ class PlatformInputLinux : public IPlatformInput {
         // If the translator did not recognize the key, safely drop the injection attempt
         if (evdev_code == 0) {
             std::cerr << "[DBUS WARN] Nierozpoznany kod klawisza: " << keyCode << ". Pomijam zastrzyk." << std::endl;
+            return;
+        }
+
+        if (m_batchMode) {
+            GError* error = nullptr;
+            GVariant* result = g_dbus_connection_call_sync(
+                connection,
+                "org.freedesktop.portal.Desktop",
+                "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.RemoteDesktop",
+                "NotifyKeyboardKeycode",
+                g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder, evdev_code, state),
+                nullptr,
+                G_DBUS_CALL_FLAGS_NONE,
+                -1,
+                nullptr,
+                &error
+            );
+
+            if (error) {
+                std::cerr << "Failed to send NotifyKeyboardKeycode: " << error->message << std::endl;
+                g_error_free(error);
+            }
+
+            if (result) {
+                g_variant_unref(result);
+            }
             return;
         }
 
@@ -501,4 +610,11 @@ class PlatformInputLinux : public IPlatformInput {
     send_keysym_sync(true);  // Press
     send_keysym_sync(false); // Release
 }
+
+    void ExecuteEvents(const std::vector<InputEvent>& events) override {
+        bool previousBatchMode = m_batchMode;
+        m_batchMode = true;
+        IPlatformInput::ExecuteEvents(events);
+        m_batchMode = previousBatchMode;
+    }
 };

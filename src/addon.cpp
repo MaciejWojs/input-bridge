@@ -92,6 +92,18 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
     }
 
     private:
+    static InputRoute DetectInputMode(bool isTextEvent, bool hasShortcutModifiers) {
+        if (isTextEvent) {
+            return InputRoute::Unicode;
+        }
+
+        if (hasShortcutModifiers) {
+            return InputRoute::Keyboard;
+        }
+
+        return InputRoute::Keyboard;
+    }
+
     InputQueue m_queue;
     Napi::FunctionReference m_logger;
 
@@ -168,6 +180,7 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
             Napi::TypeError::New(info.Env(), "Expected keyCode as number and down as boolean").ThrowAsJavaScriptException();
             return info.Env().Undefined();
         }
+        (void)DetectInputMode(false, false);
         m_queue.QueueKeyPress(
             info[0].As<Napi::Number>().Int32Value(),
             info[1].As<Napi::Boolean>().Value()
@@ -189,7 +202,8 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
             Napi::TypeError::New(info.Env(), "Expected string").ThrowAsJavaScriptException();
             return info.Env().Undefined();
         }
-        
+
+        (void)DetectInputMode(true, false);
         std::u16string str = info[0].As<Napi::String>().Utf16Value();
         for (char16_t c : str) {
             m_queue.QueueTypeCharacter(c);
