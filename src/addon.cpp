@@ -205,8 +205,21 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
 
         (void)DetectInputMode(true, false);
         std::u16string str = info[0].As<Napi::String>().Utf16Value();
-        for (char16_t c : str) {
-            m_queue.QueueTypeCharacter(c);
+        for (size_t i = 0; i < str.length(); ) {
+            char16_t c = str[i];
+            uint32_t codepoint = c;
+            if (c >= 0xD800 && c <= 0xDBFF && i + 1 < str.length()) { // high surrogate
+                char16_t low = str[i+1];
+                if (low >= 0xDC00 && low <= 0xDFFF) { // low surrogate
+                    codepoint = 0x10000 + ((c - 0xD800) << 10) + (low - 0xDC00);
+                    i += 2;
+                } else {
+                    i++;
+                }
+            } else {
+                i++;
+            }
+            m_queue.QueueTypeCharacter(codepoint);
         }
         return info.Env().Undefined();
     }

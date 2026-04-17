@@ -88,7 +88,7 @@ class PlatformInputWin : public IPlatformInput {
         SendInput(1, &input, sizeof(INPUT));
     }
 
-    void TypeCharacter(char16_t charCode) override {
+    void TypeCharacter(uint32_t charCode) override {
         Log("PlatformInputWin: TypeCharacter charCode=" + std::to_string(charCode));
 
         INPUT inputs[2] = { 0 };

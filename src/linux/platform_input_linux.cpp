@@ -525,7 +525,7 @@ class PlatformInputLinux : public IPlatformInput {
         );
     }
 
-   void TypeCharacter(char16_t charCode) override {
+   void TypeCharacter(uint32_t charCode) override {
     if (!is_session_ready) return;
 
     uint32_t codepoint = static_cast<uint32_t>(charCode);

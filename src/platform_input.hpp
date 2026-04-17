@@ -20,7 +20,7 @@ struct MouseMoveAbsolute { int32_t x; int32_t y; };
 struct MouseClick { int32_t button; bool down; };
 struct KeyPress { int32_t keyCode; bool down; InputRoute routedTo = InputRoute::Keyboard; };
 struct MouseScroll { int32_t delta; };
-struct TypeCharacter { char16_t charCode; InputRoute routedTo = InputRoute::Unicode; };
+struct TypeCharacter { uint32_t charCode; InputRoute routedTo = InputRoute::Unicode; };
 
 using InputEvent = std::variant<MouseMoveRelative, MouseMoveAbsolute, MouseClick, KeyPress, MouseScroll, TypeCharacter>;
 
@@ -48,7 +48,7 @@ class IPlatformInput {
     virtual void MouseClick(int32_t button, bool down) = 0;
     virtual void KeyPress(int32_t keyCode, bool down) = 0;
     virtual void ScrollMouse(int32_t delta) {} // optional
-    virtual void TypeCharacter(char16_t charCode) {} // optional
+    virtual void TypeCharacter(uint32_t charCode) {} // optional
 
     // Default implementation that executes a batch of events in order. Platform-specific backends can override this for optimization.
     virtual void ExecuteEvents(const std::vector<InputEvent>& events) {
@@ -104,7 +104,7 @@ class InputQueue {
         m_events.push_back(MouseScroll{ delta });
     }
 
-    void QueueTypeCharacter(char16_t charCode) {
+    void QueueTypeCharacter(uint32_t charCode) {
         m_events.push_back(TypeCharacter{ charCode, InputRoute::Unicode });
     }
 
