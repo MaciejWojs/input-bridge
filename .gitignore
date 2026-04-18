@@ -230,3 +230,4 @@ prebuilds/
 dist/
 build/
 playground/
+*.txt
