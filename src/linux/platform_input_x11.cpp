@@ -322,8 +322,8 @@ public:
         XTestFakeKeyEvent(m_display, x11Code, down ? True : False, CurrentTime);
     }
 
-    void TypeCharacter(char16_t charCode) override {
-        uint32_t codepoint = static_cast<uint32_t>(charCode);
+    void TypeCharacter(uint32_t charCode) override {
+        uint32_t codepoint = charCode;
         KeySym keySym = 0;
 
         // 1. Try mapping with libxkbcommon (if loaded)
