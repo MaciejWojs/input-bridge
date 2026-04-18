@@ -13,7 +13,7 @@
                 "args": [
                     "-NoProfile",
                     "-Command",
-                    "Remove-Item -Recurse -Force build,dist,prebuilds,playground/input_bridge_addon.node,maciejwojs-input-bridge-*.tgz -ErrorAction SilentlyContinue"
+                    "Remove-Item -Recurse -Force build,dist,prebuilds -ErrorAction SilentlyContinue; Remove-Item -Force -Path 'playground\\input_bridge_addon*.node' -ErrorAction SilentlyContinue; Get-ChildItem -Recurse -Depth 1 -Path . -Filter 'maciejwojs-input-bridge-*.tgz' -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue"
                 ]
             },
             "presentation": {
@@ -112,7 +112,12 @@
             "label": "playground",
             "detail": "Runs the playground script. Depends on prepare to ensure the addon is built and ready.",
             "type": "shell",
-            "command": "cp ${workspaceFolder}/build/Release/input_bridge_addon.node ${workspaceFolder}/playground && bun run playground",
+            "linux": {
+                "command": "cp ${workspaceFolder}/build/Release/input_bridge_addon.node ${workspaceFolder}/playground && bun run playground "
+            },
+            "windows": {
+                "command": "copy ${workspaceFolder}\\build\\Release\\input_bridge_addon.node ${workspaceFolder}\\playground; bun run playground"
+            },
             "dependsOn": [
                 "prepare"
             ],
