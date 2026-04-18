@@ -12,36 +12,12 @@
 #include <chrono>
 #include <dlfcn.h>
 
-using xkb_utf32_to_keysym_t = uint32_t(*)(uint32_t);
-
-static std::string ToHex(uint32_t value) {
-    std::ostringstream ss;
-    ss << "0x" << std::hex << std::uppercase << value;
-    return ss.str();
-}
-static void* xkb_handle = nullptr;
-static xkb_utf32_to_keysym_t xkb_utf32_to_keysym_func = nullptr;
-static bool xkb_common_initialized = false;
-
-static void InitOptionalXkbCommon() {
-    if (xkb_common_initialized) return;
-    xkb_common_initialized = true;
-
-    xkb_handle = dlopen("libxkbcommon.so.0", RTLD_LAZY | RTLD_LOCAL);
-    if (!xkb_handle) {
-        xkb_handle = dlopen("libxkbcommon.so", RTLD_LAZY | RTLD_LOCAL);
-    }
-
-    if (xkb_handle) {
-        xkb_utf32_to_keysym_func = reinterpret_cast<xkb_utf32_to_keysym_t>(dlsym(xkb_handle, "xkb_utf32_to_keysym"));
-    }
-}
-
 class PlatformInputLinux : public IPlatformInput {
     private:
     GDBusConnection* connection = nullptr;
     std::string session_handle;
     bool is_session_ready = false;
+    bool m_batchMode = false;
     
     GMainLoop* main_loop = nullptr;
     std::thread loop_thread;
@@ -332,6 +308,33 @@ class PlatformInputLinux : public IPlatformInput {
         GVariantBuilder options_builder;
         g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
 
+        if (m_batchMode) {
+            GError* error = nullptr;
+            GVariant* result = g_dbus_connection_call_sync(
+                connection,
+                "org.freedesktop.portal.Desktop",
+                "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.RemoteDesktop",
+                "NotifyPointerMotion",
+                g_variant_new("(oa{sv}dd)", session_handle.c_str(), &options_builder, (double)x, (double)y),
+                nullptr,
+                G_DBUS_CALL_FLAGS_NONE,
+                -1,
+                nullptr,
+                &error
+            );
+
+            if (error) {
+                std::cerr << "Failed to send NotifyPointerMotion: " << error->message << std::endl;
+                g_error_free(error);
+            }
+
+            if (result) {
+                g_variant_unref(result);
+            }
+            return;
+        }
+
         g_dbus_connection_call(
             connection,
             "org.freedesktop.portal.Desktop",
@@ -353,6 +356,33 @@ class PlatformInputLinux : public IPlatformInput {
 
         GVariantBuilder options_builder;
         g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
+
+        if (m_batchMode) {
+            GError* error = nullptr;
+            GVariant* result = g_dbus_connection_call_sync(
+                connection,
+                "org.freedesktop.portal.Desktop",
+                "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.RemoteDesktop",
+                "NotifyPointerMotionAbsolute",
+                g_variant_new("(oa{sv}udd)", session_handle.c_str(), &options_builder, 0, (double)x, (double)y),
+                nullptr,
+                G_DBUS_CALL_FLAGS_NONE,
+                -1,
+                nullptr,
+                &error
+            );
+
+            if (error) {
+                std::cerr << "Failed to send NotifyPointerMotionAbsolute: " << error->message << std::endl;
+                g_error_free(error);
+            }
+
+            if (result) {
+                g_variant_unref(result);
+            }
+            return;
+        }
 
         g_dbus_connection_call(
             connection,
@@ -380,6 +410,33 @@ class PlatformInputLinux : public IPlatformInput {
         uint32_t linux_button = 0x110; 
         if (button == 1) linux_button = 0x111;
         else if (button == 2) linux_button = 0x112;
+
+        if (m_batchMode) {
+            GError* error = nullptr;
+            GVariant* result = g_dbus_connection_call_sync(
+                connection,
+                "org.freedesktop.portal.Desktop",
+                "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.RemoteDesktop",
+                "NotifyPointerButton",
+                g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder, linux_button, state),
+                nullptr,
+                G_DBUS_CALL_FLAGS_NONE,
+                -1,
+                nullptr,
+                &error
+            );
+
+            if (error) {
+                std::cerr << "Failed to send NotifyPointerButton: " << error->message << std::endl;
+                g_error_free(error);
+            }
+
+            if (result) {
+                g_variant_unref(result);
+            }
+            return;
+        }
 
         g_dbus_connection_call(
             connection,
@@ -425,6 +482,33 @@ class PlatformInputLinux : public IPlatformInput {
             return;
         }
 
+        if (m_batchMode) {
+            GError* error = nullptr;
+            GVariant* result = g_dbus_connection_call_sync(
+                connection,
+                "org.freedesktop.portal.Desktop",
+                "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.RemoteDesktop",
+                "NotifyKeyboardKeycode",
+                g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder, evdev_code, state),
+                nullptr,
+                G_DBUS_CALL_FLAGS_NONE,
+                -1,
+                nullptr,
+                &error
+            );
+
+            if (error) {
+                std::cerr << "Failed to send NotifyKeyboardKeycode: " << error->message << std::endl;
+                g_error_free(error);
+            }
+
+            if (result) {
+                g_variant_unref(result);
+            }
+            return;
+        }
+
         g_dbus_connection_call(
             connection,
             "org.freedesktop.portal.Desktop",
@@ -441,64 +525,102 @@ class PlatformInputLinux : public IPlatformInput {
         );
     }
 
-   void TypeCharacter(char16_t charCode) override {
+   void TypeCharacter(uint32_t charCode) override {
     if (!is_session_ready) return;
 
     uint32_t codepoint = static_cast<uint32_t>(charCode);
-    uint32_t keysym = 0;
-
-    // 1. Try mapping with libxkbcommon (if loaded)
-    InitOptionalXkbCommon();
-    if (xkb_utf32_to_keysym_func) {
-        std::cout << "Mapping char '" << (char)charCode << "' (U+" << ToHex(codepoint) << ") using xkbcommon..." << std::endl;
-        keysym = xkb_utf32_to_keysym_func(codepoint);
-    }
-
-    // 2. Fallback to the standard Unicode Keysym (if xkb fails)
-    if (keysym == 0) {
-        if (codepoint >= 0x20 && codepoint <= 0x7E) {
-            keysym = codepoint; // ASCII
-        } else if (codepoint > 0x7E) {
-            keysym = codepoint | 0x01000000; // Standard Unicode prefix in X11
-        } else {
-            // Handle control keys
-            if (codepoint == 0x0D) keysym = 0xFF0D;      // Enter
-            else if (codepoint == 0x08) keysym = 0xFF08; // Backspace
-            else if (codepoint == 0x09) keysym = 0xFF09; // Tab
-            else return;
-        }
-    }
-
-    // Helper function for synchronous sending
-    auto send_keysym_sync = [&](bool down) {
+    
+    auto send_key = [&](uint32_t evdev, bool down) {
         GVariantBuilder options_builder;
         g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
-        
-        GError* error = nullptr;
-        // Use CALL_SYNC to preserve character order
         GVariant* result = g_dbus_connection_call_sync(
             connection,
             "org.freedesktop.portal.Desktop",
             "/org/freedesktop/portal/desktop",
             "org.freedesktop.portal.RemoteDesktop",
-            "NotifyKeyboardKeysym",
-            g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder, (int32_t)keysym, down ? 1 : 0),
+            "NotifyKeyboardKeycode",
+            g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder, (int32_t)evdev, down ? 1 : 0),
             nullptr,
             G_DBUS_CALL_FLAGS_NONE,
             -1,
             nullptr,
-            &error
+            nullptr
         );
-
-        if (error) {
-            std::cerr << "[DBUS ERR] TypeCharacter: " << error->message << std::endl;
-            g_error_free(error);
-        }
         if (result) g_variant_unref(result);
+        std::this_thread::sleep_for(std::chrono::milliseconds(4));
     };
 
-    // The sequence must be atomic for each character
-    send_keysym_sync(true);  // Press
-    send_keysym_sync(false); // Release
+    auto tap_key = [&](uint32_t evdev) {
+        send_key(evdev, true);
+        send_key(evdev, false);
+    };
+
+    if (codepoint == 0x0D || codepoint == 0x0A) { tap_key(28); return; } // Enter
+    if (codepoint == 0x08) { tap_key(14); return; } // Backspace
+    if (codepoint == 0x09) { tap_key(15); return; } // Tab
+    if (codepoint == 0x20) { tap_key(57); return; } // Space
+
+    // Fallback: NotifyKeyboardKeysym usually works well for basic ASCII
+    if (codepoint >= 0x20 && codepoint <= 0x7E) {
+        GVariantBuilder options_builder1;
+        g_variant_builder_init(&options_builder1, G_VARIANT_TYPE_VARDICT);
+        g_dbus_connection_call_sync(connection, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.RemoteDesktop", "NotifyKeyboardKeysym",
+            g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder1, (int32_t)codepoint, 1),
+            nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr);
+            
+        GVariantBuilder options_builder2;
+        g_variant_builder_init(&options_builder2, G_VARIANT_TYPE_VARDICT);
+        g_dbus_connection_call_sync(connection, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.RemoteDesktop", "NotifyKeyboardKeysym",
+            g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder2, (int32_t)codepoint, 0),
+            nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr);
+            
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        return;
+    }
+
+    // Dla znaków wykraczających poza layout (Unicode) używamy Ctrl+Shift+U + Hex + Space
+    char hex[10];
+    snprintf(hex, sizeof(hex), "%x", codepoint);
+    
+    send_key(29, true); // Left Ctrl
+    send_key(42, true); // Left Shift
+    tap_key(22);        // U (evdev 22)
+    send_key(42, false);
+    send_key(29, false);
+
+    for (int i = 0; hex[i] != '\0'; i++) {
+        uint32_t evdev = 0;
+        char c = hex[i];
+        if (c == '0') evdev = 11;
+        else if (c == '1') evdev = 2;
+        else if (c == '2') evdev = 3;
+        else if (c == '3') evdev = 4;
+        else if (c == '4') evdev = 5;
+        else if (c == '5') evdev = 6;
+        else if (c == '6') evdev = 7;
+        else if (c == '7') evdev = 8;
+        else if (c == '8') evdev = 9;
+        else if (c == '9') evdev = 10;
+        else if (c == 'a') evdev = 30;
+        else if (c == 'b') evdev = 48;
+        else if (c == 'c') evdev = 46;
+        else if (c == 'd') evdev = 32;
+        else if (c == 'e') evdev = 18;
+        else if (c == 'f') evdev = 33;
+        
+        if (evdev > 0) tap_key(evdev);
+    }
+    
+    tap_key(57); // Space to finish
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
 }
+
+    void ExecuteEvents(const std::vector<InputEvent>& events) override {
+        bool previousBatchMode = m_batchMode;
+        m_batchMode = true;
+        IPlatformInput::ExecuteEvents(events);
+        m_batchMode = previousBatchMode;
+    }
 };

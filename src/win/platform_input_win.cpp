@@ -88,19 +88,38 @@ class PlatformInputWin : public IPlatformInput {
         SendInput(1, &input, sizeof(INPUT));
     }
 
-    void TypeCharacter(char16_t charCode) override {
+    void AppendUnicodeInputSequence(uint32_t charCode, std::vector<INPUT>& outputs) {
+        auto append = [&](WORD scan, DWORD flags) {
+            INPUT input = { 0 };
+            input.type = INPUT_KEYBOARD;
+            input.ki.wScan = scan;
+            input.ki.dwFlags = flags;
+            outputs.push_back(input);
+            };
+
+        if (charCode <= 0xFFFF) {
+            append(static_cast<WORD>(charCode), KEYEVENTF_UNICODE);
+            append(static_cast<WORD>(charCode), KEYEVENTF_UNICODE | KEYEVENTF_KEYUP);
+            return;
+        }
+
+        uint32_t scalar = charCode - 0x10000;
+        WORD highSurrogate = static_cast<WORD>(0xD800 + ((scalar >> 10) & 0x3FF));
+        WORD lowSurrogate = static_cast<WORD>(0xDC00 + (scalar & 0x3FF));
+
+        append(highSurrogate, KEYEVENTF_UNICODE);
+        append(highSurrogate, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP);
+        append(lowSurrogate, KEYEVENTF_UNICODE);
+        append(lowSurrogate, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP);
+    }
+
+    void TypeCharacter(uint32_t charCode) override {
         Log("PlatformInputWin: TypeCharacter charCode=" + std::to_string(charCode));
 
-        INPUT inputs[2] = { 0 };
-        inputs[0].type = INPUT_KEYBOARD;
-        inputs[0].ki.wScan = static_cast<WORD>(charCode);
-        inputs[0].ki.dwFlags = KEYEVENTF_UNICODE;
-
-        inputs[1].type = INPUT_KEYBOARD;
-        inputs[1].ki.wScan = static_cast<WORD>(charCode);
-        inputs[1].ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
-
-        SendInput(2, inputs, sizeof(INPUT));
+        std::vector<INPUT> inputs;
+        inputs.reserve(charCode > 0xFFFF ? 4 : 2);
+        AppendUnicodeInputSequence(charCode, inputs);
+        SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT));
     }
 
     void ExecuteEvents(const std::vector<InputEvent>& events) override {
@@ -109,28 +128,34 @@ class PlatformInputWin : public IPlatformInput {
         m_winInputs.clear();
 
         for (const auto& ev : events) {
-            INPUT input = { 0 };
-            bool hasSecond = false;
-            INPUT input2 = { 0 };
+            std::vector<INPUT> eventInputs;
+            eventInputs.reserve(4);
 
-            std::visit([&input, &hasSecond, &input2](auto&& e) {
+            std::visit([&](auto&& e) {
                 using T = std::decay_t<decltype(e)>;
                 if constexpr (std::is_same_v<T, struct MouseMoveRelative>) {
+                    INPUT input = { 0 };
                     input.type = INPUT_MOUSE;
                     input.mi.dx = e.x;
                     input.mi.dy = e.y;
                     input.mi.dwFlags = MOUSEEVENTF_MOVE;
+                    eventInputs.push_back(input);
                 } else if constexpr (std::is_same_v<T, struct MouseMoveAbsolute>) {
+                    INPUT input = { 0 };
                     input.type = INPUT_MOUSE;
                     input.mi.dx = (e.x * 65535) / (GetSystemMetrics(SM_CXSCREEN) - 1);
                     input.mi.dy = (e.y * 65535) / (GetSystemMetrics(SM_CYSCREEN) - 1);
                     input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+                    eventInputs.push_back(input);
                 } else if constexpr (std::is_same_v<T, struct MouseClick>) {
+                    INPUT input = { 0 };
                     input.type = INPUT_MOUSE;
                     if (e.button == 0)      input.mi.dwFlags = e.down ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
                     else if (e.button == 1) input.mi.dwFlags = e.down ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP;
                     else if (e.button == 2) input.mi.dwFlags = e.down ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP;
+                    eventInputs.push_back(input);
                 } else if constexpr (std::is_same_v<T, struct KeyPress>) {
+                    INPUT input = { 0 };
                     input.type = INPUT_KEYBOARD;
                     input.ki.wVk = static_cast<WORD>(e.keyCode);
                     input.ki.wScan = MapVirtualKey(input.ki.wVk, MAPVK_VK_TO_VSC);
@@ -138,25 +163,19 @@ class PlatformInputWin : public IPlatformInput {
                     if (!e.down) {
                         input.ki.dwFlags |= KEYEVENTF_KEYUP;
                     }
+                    eventInputs.push_back(input);
                 } else if constexpr (std::is_same_v<T, struct MouseScroll>) {
+                    INPUT input = { 0 };
                     input.type = INPUT_MOUSE;
                     input.mi.mouseData = e.delta;
                     input.mi.dwFlags = MOUSEEVENTF_WHEEL;
+                    eventInputs.push_back(input);
                 } else if constexpr (std::is_same_v<T, struct TypeCharacter>) {
-                    input.type = INPUT_KEYBOARD;
-                    input.ki.wScan = static_cast<WORD>(e.charCode);
-                    input.ki.dwFlags = KEYEVENTF_UNICODE;
-                    
-                    input2 = input;
-                    input2.ki.dwFlags |= KEYEVENTF_KEYUP;
-                    hasSecond = true;
+                    AppendUnicodeInputSequence(e.charCode, eventInputs);
                 }
                 }, ev);
 
-            m_winInputs.push_back(input);
-            if (hasSecond) {
-                m_winInputs.push_back(input2);
-            }
+            m_winInputs.insert(m_winInputs.end(), eventInputs.begin(), eventInputs.end());
         }
 
         if (!m_winInputs.empty()) {
