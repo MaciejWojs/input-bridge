@@ -1,3 +1,16 @@
+## 0.2.0 (2026-04-18)
+
+* feat: add playground directory and .txt files to .gitignore ([197107f](https://github.com/MaciejWojs/input-bridge/commit/197107f))
+* feat: add TypeScript package build and release steps to CI workflow ([181296b](https://github.com/MaciejWojs/input-bridge/commit/181296b))
+* feat: enhance cleanup and playground tasks for improved file handling on Windows ([a7d2031](https://github.com/MaciejWojs/input-bridge/commit/a7d2031))
+* feat: enhance TypeCharacter handling to support Unicode input sequences ([8bc1429](https://github.com/MaciejWojs/input-bridge/commit/8bc1429))
+* feat: expand build matrix to include ARM architectures and update upload artifact action ([202a022](https://github.com/MaciejWojs/input-bridge/commit/202a022))
+* feat: implement batch mode for input events and enhance input routing ([a0a3da9](https://github.com/MaciejWojs/input-bridge/commit/a0a3da9))
+* feat: streamline character input handling and remove unused xkbcommon integration ([d674eda](https://github.com/MaciejWojs/input-bridge/commit/d674eda))
+* feat: update TypeCharacter handling to support Unicode codepoints ([f3b515e](https://github.com/MaciejWojs/input-bridge/commit/f3b515e))
+* chotr: update TypeScript version and workspace name in lockfile ([93c824f](https://github.com/MaciejWojs/input-bridge/commit/93c824f))
+* fix/correct type of passed arguments for x11 input platform ([aca1c06](https://github.com/MaciejWojs/input-bridge/commit/aca1c06))
+* chore: remove unused prebuildify:all script from package.json ([1cdb894](https://github.com/MaciejWojs/input-bridge/commit/1cdb894))
 
 ## 0.1.0 (2026-04-11)
 
