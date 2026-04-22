@@ -12,6 +12,7 @@ Native Node.js addon for simulating hardware input events on Windows and Linux. 
 - Mouse button clicks and wheel scrolling
 - Raw keyboard events and typed Unicode text
 - DOM `KeyboardEvent.code` mapping via `keyPressDOM()`
+- Clipboard reading and writing text and files support for Wayland (`wl-copy`/`wl-paste`) and X11 (`xclip`)
 - Movement optimization via `optimizeMouseMovesRelative()` and `optimizeMouseMovesAbsolute()`
 - Optional native logger callback from the addon
 
@@ -45,6 +46,10 @@ bridge.flush();
 - `keyPressDOM(domCode, down)` - queue a scan-code based key event from DOM `KeyboardEvent.code`
 - `scrollMouse(delta)` - queue a mouse wheel scroll event
 - `typeString(text)` - queue typed Unicode text
+- `setClipboardText(text)` - copy text to the clipboard
+- `getClipboardText()` - read text from the clipboard
+- `setClipboardFiles(paths)` - copy a list of files to the clipboard
+- `getClipboardFiles()` - read a list of files from the clipboard
 - `optimizeMouseMovesRelative(distanceThreshold)` - reduce buffered relative move events
 - `optimizeMouseMovesAbsolute(distanceThreshold)` - reduce buffered absolute move events
 - `toggleOptimization()` - enable/disable internal mouse move optimization

@@ -14,12 +14,60 @@
 
 class PlatformInputLinux : public IPlatformInput {
 
-    bool SetClipboardText(const std::string&) override { return false; }
-    std::optional<std::string> GetClipboardText() override { return std::nullopt; }
-    bool SetClipboardFiles(const std::vector<std::string>&) override { return false; }
-    std::optional<std::vector<std::string>> GetClipboardFiles() override { return std::nullopt; }
-    bool SetClipboardFilesRemote(const std::vector<std::string>&) override { return false; }
-    std::optional<std::vector<std::string>> GetClipboardFilesRemote() override { return std::nullopt; }
+    bool SetClipboardText(const std::string& text) override {
+        FILE* pipe = popen("wl-copy", "w");
+        if (!pipe) return false;
+        fwrite(text.data(), 1, text.size(), pipe);
+        return pclose(pipe) == 0;
+    }
+
+    std::optional<std::string> GetClipboardText() override {
+        FILE* pipe = popen("wl-paste -n", "r");
+        if (!pipe) return std::nullopt;
+        std::string result;
+        char buffer[128];
+        while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+            result += buffer;
+        }
+        if (pclose(pipe) != 0 && result.empty()) return std::nullopt;
+        return result;
+    }
+
+    bool SetClipboardFiles(const std::vector<std::string>& files) override {
+        FILE* pipe = popen("wl-copy -t text/uri-list", "w");
+        if (!pipe) return false;
+        for (const auto& file : files) {
+            std::string uri = "file://" + file + "\r\n";
+            fwrite(uri.data(), 1, uri.size(), pipe);
+        }
+        return pclose(pipe) == 0;
+    }
+
+    std::optional<std::vector<std::string>> GetClipboardFiles() override {
+        FILE* pipe = popen("wl-paste -t text/uri-list", "r");
+        if (!pipe) return std::nullopt;
+        std::vector<std::string> files;
+        char buffer[1024];
+        while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+            std::string line = buffer;
+            if (!line.empty() && line.back() == '\n') line.pop_back();
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            const std::string prefix = "file://";
+            if (line.compare(0, prefix.size(), prefix) == 0) {
+                files.push_back(line.substr(prefix.size()));
+            }
+        }
+        pclose(pipe);
+        return files.empty() ? std::nullopt : std::make_optional(files);
+    }
+
+    bool SetClipboardFilesRemote(const std::vector<std::string>& files) override {
+        return SetClipboardFiles(files);
+    }
+
+    std::optional<std::vector<std::string>> GetClipboardFilesRemote() override {
+        return GetClipboardFiles();
+    }
 
     private:
     GDBusConnection* connection = nullptr;
