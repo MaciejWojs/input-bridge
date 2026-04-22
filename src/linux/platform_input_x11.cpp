@@ -5,6 +5,11 @@
 #include <X11/keysym.h>
 #include <X11/extensions/XTest.h>
 
+#include <array>
+#include <algorithm>
+#include <mutex>
+#include <thread>
+
 // Fix for X11 macro pollution
 #undef KeyPress
 #undef KeyRelease
@@ -41,8 +46,8 @@ static void InitOptionalXkbCommon() {
 
 namespace {
 
-KeySym EvdevToX11KeySym(int32_t evdev) {
-    switch (evdev) {
+    KeySym EvdevToX11KeySym(int32_t evdev) {
+        switch (evdev) {
         case 30: return XK_a;
         case 48: return XK_b;
         case 46: return XK_c;
@@ -99,21 +104,21 @@ KeySym EvdevToX11KeySym(int32_t evdev) {
         case 56: return XK_Alt_L;
         case 100: return XK_Alt_R;
         default: return NoSymbol;
-    }
-}
-
-KeySym CharToKeySym(char32_t cp, bool& needShift) {
-    needShift = false;
-
-    if (cp >= U'a' && cp <= U'z') {
-        return static_cast<KeySym>(cp);
+        }
     }
 
-    if (cp >= U'A' && cp <= U'Z') {
-        needShift = true;
-        return static_cast<KeySym>(cp + 32);
-    }
-    switch (cp) {
+    KeySym CharToKeySym(char32_t cp, bool& needShift) {
+        needShift = false;
+
+        if (cp >= U'a' && cp <= U'z') {
+            return static_cast<KeySym>(cp);
+        }
+
+        if (cp >= U'A' && cp <= U'Z') {
+            needShift = true;
+            return static_cast<KeySym>(cp + 32);
+        }
+        switch (cp) {
         case U' ': return XK_space;
         case U'\n': return XK_Return;
         case U'\r': return XK_Return;
@@ -140,24 +145,31 @@ KeySym CharToKeySym(char32_t cp, bool& needShift) {
         case U'?': needShift = true; return XK_slash;
         case U'~': needShift = true; return XK_grave;
         default: break;
-    }
+        }
 
-    if (cp <= 0x7f) {
-        return static_cast<KeySym>(cp);
-    }
+        if (cp <= 0x7f) {
+            return static_cast<KeySym>(cp);
+        }
 
-    return static_cast<KeySym>(0x01000000u | cp);
-}
+        return static_cast<KeySym>(0x01000000u | cp);
+    }
 
 } // namespace
 
 class X11PlatformInput : public IPlatformInput {
-private:
+    private:
     Display* m_display = nullptr;
     std::vector<KeyCode> m_scratchCodes;
     std::vector<KeySym> m_scratchSyms;
     size_t m_scratchIndex = 0;
     bool m_scratchInitialized = false;
+
+    std::jthread m_detectionThread;
+    std::mutex m_detectedMutex;
+    std::vector<InputEvent> m_detectedEvents;
+    std::array<char, 32> m_prevKeyState{};
+    int32_t m_prevMouseX = 0;
+    int32_t m_prevMouseY = 0;
 
     void InitScratch() {
         if (m_scratchInitialized) return;
@@ -201,7 +213,7 @@ private:
         KeyCode code = m_scratchCodes[idx];
         m_scratchSyms[idx] = sym;
 
-        KeySym newSyms[2] = { sym, sym }; 
+        KeySym newSyms[2] = { sym, sym };
         XChangeKeyboardMapping(m_display, code, 2, newSyms, 1);
         XSync(m_display, False);
 
@@ -241,7 +253,84 @@ private:
         usleep(1000);
     }
 
-public:
+    void DetectionLoop(std::stop_token stopToken) {
+        while (!stopToken.stop_requested()) {
+            usleep(20000); // 20ms polling
+
+            Window rootReturn, childReturn;
+            int rootX = 0, rootY = 0, winX = 0, winY = 0;
+            unsigned int mask = 0;
+            if (XQueryPointer(m_display, DefaultRootWindow(m_display), &rootReturn, &childReturn, &rootX, &rootY, &winX, &winY, &mask)) {
+                int32_t deltaX = rootX - m_prevMouseX;
+                int32_t deltaY = rootY - m_prevMouseY;
+                if (deltaX != 0 || deltaY != 0) {
+                    std::lock_guard<std::mutex> lock(m_detectedMutex);
+                    m_detectedEvents.push_back(MouseMoveRelative{ deltaX, deltaY });
+                }
+                m_prevMouseX = rootX;
+                m_prevMouseY = rootY;
+            }
+
+            char keyState[32] = { 0 };
+            XQueryKeymap(m_display, keyState);
+            for (int byte = 0; byte < 32; ++byte) {
+                if (keyState[byte] != m_prevKeyState[byte]) {
+                    for (int bit = 0; bit < 8; ++bit) {
+                        int keycode = byte * 8 + bit;
+                        bool isDown = (keyState[byte] & (1 << bit)) != 0;
+                        bool wasDown = (m_prevKeyState[byte] & (1 << bit)) != 0;
+                        if (isDown != wasDown) {
+                            std::lock_guard<std::mutex> lock(m_detectedMutex);
+                            m_detectedEvents.push_back(KeyPress{ keycode, isDown, InputRoute::Keyboard });
+                        }
+                    }
+                }
+            }
+            std::copy_n(keyState, 32, m_prevKeyState.data());
+        }
+    }
+
+    bool StartInputDetection() override {
+        if (!m_display) return false;
+        if (m_detectionThread.joinable()) {
+            return true;
+        }
+
+        char keyState[32] = { 0 };
+        XQueryKeymap(m_display, keyState);
+        std::copy_n(keyState, 32, m_prevKeyState.data());
+
+        Window rootReturn, childReturn;
+        unsigned int mask = 0;
+        int rootX = 0, rootY = 0, winX = 0, winY = 0;
+        XQueryPointer(m_display, DefaultRootWindow(m_display), &rootReturn, &childReturn, &rootX, &rootY, &winX, &winY, &mask);
+        m_prevMouseX = rootX;
+        m_prevMouseY = rootY;
+
+        m_detectionThread = std::jthread([this](std::stop_token stopToken) {
+            this->DetectionLoop(stopToken);
+        });
+        return true;
+    }
+
+    void StopInputDetection() override {
+        if (!m_detectionThread.joinable()) {
+            return;
+        }
+        m_detectionThread.request_stop();
+        m_detectionThread.join();
+    }
+
+    std::vector<InputEvent> DrainDetectedInputEvents() override {
+        std::vector<InputEvent> drained;
+        {
+            std::lock_guard<std::mutex> lock(m_detectedMutex);
+            drained.swap(m_detectedEvents);
+        }
+        return drained;
+    }
+
+    public:
     X11PlatformInput() {
         m_display = XOpenDisplay(nullptr);
         if (m_display == nullptr) {
@@ -376,7 +465,7 @@ public:
             // aby uniknąć błędów wyścigów w target aplikacji
             keyCode = GetScratchForSym(keySym);
             needShift = false; // Został przypisany wprost!
-            
+
             if (keyCode == 0) {
                 fprintf(stderr, "[X11 WARN] Brak pustego przycisku dla znaku U+%04X\n", codepoint);
                 return;

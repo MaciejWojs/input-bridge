@@ -195,7 +195,32 @@ export interface IInputBridge {
      * ```
      */
     keyPressDOM(domCode: string, down: boolean): boolean;
+
+    /**
+     * Starts continuous native input detection.
+     * Returns `true` if the current backend supports input capture.
+     */
+    startInputDetection(): boolean;
+
+    /**
+     * Stops continuous native input detection.
+     */
+    stopInputDetection(): void;
+
+    /**
+     * Retrieves all detected native input events since the last poll.
+     * The returned events are drained from the native queue.
+     */
+    pollDetectedInput(): DetectedInputEvent[];
 }
+
+export type DetectedInputEvent =
+    | { type: 'mouseMoveRelative'; x: number; y: number }
+    | { type: 'mouseMoveAbsolute'; x: number; y: number }
+    | { type: 'mouseClick'; button: number; down: boolean }
+    | { type: 'keyPress'; keyCode: number; down: boolean }
+    | { type: 'mouseScroll'; delta: number }
+    | { type: 'typeCharacter'; charCode: number };
 
 interface INativeAddon {
     InputBridge: new () => IInputBridge;
@@ -243,56 +268,68 @@ export class InputBridge implements IInputBridge {
         return this.nativeBridge.init();
     }
 
-    moveMouseRelative(x: number, y: number): void { 
-        this.nativeBridge.moveMouseRelative(x, y); 
+    moveMouseRelative(x: number, y: number): void {
+        this.nativeBridge.moveMouseRelative(x, y);
         if (this.autoFlush) this.flush();
     }
-    
-    moveMouseAbsolute(x: number, y: number): void { 
-        this.nativeBridge.moveMouseAbsolute(x, y); 
+
+    moveMouseAbsolute(x: number, y: number): void {
+        this.nativeBridge.moveMouseAbsolute(x, y);
         if (this.autoFlush) this.flush();
     }
-    
-    mouseClick(button: number, down: boolean): void { 
-        this.nativeBridge.mouseClick(button, down); 
+
+    mouseClick(button: number, down: boolean): void {
+        this.nativeBridge.mouseClick(button, down);
         if (this.autoFlush) this.flush();
     }
-    
-    keyPress(keyCode: number, down: boolean): void { 
-        this.nativeBridge.keyPress(keyCode, down); 
+
+    keyPress(keyCode: number, down: boolean): void {
+        this.nativeBridge.keyPress(keyCode, down);
         if (this.autoFlush) this.flush();
     }
-    
-    scrollMouse(delta: number): void { 
-        this.nativeBridge.scrollMouse(delta); 
+
+    scrollMouse(delta: number): void {
+        this.nativeBridge.scrollMouse(delta);
         if (this.autoFlush) this.flush();
     }
-    
-    typeString(text: string): void { 
-        this.nativeBridge.typeString(text); 
+
+    typeString(text: string): void {
+        this.nativeBridge.typeString(text);
         if (this.autoFlush) this.flush();
     }
-    
-    optimizeMouseMovesRelative(distanceThreshold: number): void { 
-        this.nativeBridge.optimizeMouseMovesRelative(distanceThreshold); 
+
+    optimizeMouseMovesRelative(distanceThreshold: number): void {
+        this.nativeBridge.optimizeMouseMovesRelative(distanceThreshold);
         // Config change, doesn't need flush
     }
-    
-    optimizeMouseMovesAbsolute(distanceThreshold: number): void { 
+
+    optimizeMouseMovesAbsolute(distanceThreshold: number): void {
         this.nativeBridge.optimizeMouseMovesAbsolute(distanceThreshold);
         // Config change, doesn't need flush
     }
-    
-    toggleOptimization(): boolean { 
-        return this.nativeBridge.toggleOptimization(); 
+
+    toggleOptimization(): boolean {
+        return this.nativeBridge.toggleOptimization();
     }
-    
-    flush(): void { 
-        this.nativeBridge.flush(); 
+
+    flush(): void {
+        this.nativeBridge.flush();
     }
-    
-    setLogger(callback: (msg: string) => void): void { 
-        this.nativeBridge.setLogger(callback); 
+
+    setLogger(callback: (msg: string) => void): void {
+        this.nativeBridge.setLogger(callback);
+    }
+
+    startInputDetection(): boolean {
+        return this.nativeBridge.startInputDetection();
+    }
+
+    stopInputDetection(): void {
+        this.nativeBridge.stopInputDetection();
+    }
+
+    pollDetectedInput(): DetectedInputEvent[] {
+        return this.nativeBridge.pollDetectedInput();
     }
 
     keyPressDOM(domCode: string, down: boolean): boolean {

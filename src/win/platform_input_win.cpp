@@ -2,10 +2,19 @@
 #include <windows.h>
 #include <iostream>
 #include <string>
+#include <thread>
+#include <mutex>
+#include <array>
 
 class PlatformInputWin : public IPlatformInput {
     private:
     std::vector<INPUT> m_winInputs;
+    std::jthread m_detectionThread;
+    std::mutex m_detectedMutex;
+    std::vector<InputEvent> m_detectedEvents;
+    std::array<bool, 256> m_prevKeyStates = {};
+    int32_t m_prevMouseX = 0;
+    int32_t m_prevMouseY = 0;
 
     public:
     PlatformInputWin() {
@@ -13,9 +22,94 @@ class PlatformInputWin : public IPlatformInput {
         m_winInputs.reserve(1024);
     }
 
+    ~PlatformInputWin() {
+        StopInputDetection();
+    }
+
     bool Initialize(std::string& error_msg) override {
         // Windows input injection generally does not require session authorization
         return true;
+    }
+
+    bool StartInputDetection() override {
+        if (m_detectionThread.joinable()) {
+            return true;
+        }
+
+        POINT cursorPos;
+        if (!GetCursorPos(&cursorPos)) {
+            return false;
+        }
+
+        m_prevMouseX = cursorPos.x;
+        m_prevMouseY = cursorPos.y;
+
+        for (int vk = 0; vk < 256; ++vk) {
+            m_prevKeyStates[vk] = (GetAsyncKeyState(vk) & 0x8000) != 0;
+        }
+
+        m_detectionThread = std::jthread([this](std::stop_token stopToken) {
+            this->DetectionLoop(stopToken);
+        });
+
+        return true;
+    }
+
+    void StopInputDetection() override {
+        if (!m_detectionThread.joinable()) {
+            return;
+        }
+        m_detectionThread.request_stop();
+        m_detectionThread.join();
+    }
+
+    std::vector<InputEvent> DrainDetectedInputEvents() override {
+        std::vector<InputEvent> drained;
+        {
+            std::lock_guard<std::mutex> lock(m_detectedMutex);
+            drained.swap(m_detectedEvents);
+        }
+        return drained;
+    }
+
+    void DetectionLoop(std::stop_token stopToken) {
+        while (!stopToken.stop_requested()) {
+            Sleep(10);
+
+            POINT pos;
+            if (GetCursorPos(&pos)) {
+                int32_t deltaX = pos.x - m_prevMouseX;
+                int32_t deltaY = pos.y - m_prevMouseY;
+                if (deltaX != 0 || deltaY != 0) {
+                    std::lock_guard<std::mutex> lock(m_detectedMutex);
+                    MouseMoveRelative move;
+                    move.x = deltaX;
+                    move.y = deltaY;
+                    m_detectedEvents.push_back(move);
+                }
+                m_prevMouseX = pos.x;
+                m_prevMouseY = pos.y;
+            }
+
+            std::vector<InputEvent> events;
+            events.reserve(16);
+            for (int vk = 1; vk < 256; ++vk) {
+                bool isDown = (GetAsyncKeyState(vk) & 0x8000) != 0;
+                if (isDown != m_prevKeyStates[vk]) {
+                    ::KeyPress keyEvent;
+                    keyEvent.keyCode = vk;
+                    keyEvent.down = isDown;
+                    keyEvent.routedTo = InputRoute::Keyboard;
+                    events.push_back(keyEvent);
+                    m_prevKeyStates[vk] = isDown;
+                }
+            }
+
+            if (!events.empty()) {
+                std::lock_guard<std::mutex> lock(m_detectedMutex);
+                m_detectedEvents.insert(m_detectedEvents.end(), events.begin(), events.end());
+            }
+        }
     }
 
     void MoveMouseRelative(int32_t x, int32_t y) override {
