@@ -5,59 +5,212 @@
 #include <sstream>
 #include <cstdio>
 #include <gio/gio.h>
+#include <gio/gunixfdlist.h>
+#include <unistd.h>
 #include <thread>
 #include <atomic>
 #include <mutex>
 #include <condition_variable>
 #include <chrono>
+#include <map>
 #include <dlfcn.h>
 
 class PlatformInputLinux : public IPlatformInput {
 
+    std::mutex clipboard_mutex;
+    std::map<std::string, std::string> m_clipboardData;
+    guint clipboard_signal_id = 0;
+
     bool SetClipboardText(const std::string& text) override {
-        FILE* pipe = popen("wl-copy", "w");
-        if (!pipe) return false;
-        fwrite(text.data(), 1, text.size(), pipe);
-        return pclose(pipe) == 0;
+        if (!is_session_ready) return false;
+
+        {
+            std::lock_guard<std::mutex> lock(clipboard_mutex);
+            m_clipboardData["text/plain;charset=utf-8"] = text;
+        }
+
+        GVariantBuilder options;
+        g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);
+        
+        GVariantBuilder mime_builder;
+        g_variant_builder_init(&mime_builder, G_VARIANT_TYPE_STRING_ARRAY);
+        g_variant_builder_add(&mime_builder, "s", "text/plain;charset=utf-8");
+        
+        g_variant_builder_add(&options, "{sv}", "mime_types", g_variant_builder_end(&mime_builder));
+
+        GError* error = nullptr;
+        GVariant* result = g_dbus_connection_call_sync(
+            connection,
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.Clipboard",
+            "SetSelection",
+            g_variant_new("(oa{sv})", session_handle.c_str(), &options),
+            nullptr,
+            G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            nullptr,
+            &error
+        );
+
+        if (error) {
+            std::cerr << "Failed to SetSelection (Clipboard Text): " << error->message << std::endl;
+            g_error_free(error);
+            return false;
+        }
+        if (result) g_variant_unref(result);
+        return true;
     }
 
     std::optional<std::string> GetClipboardText() override {
-        FILE* pipe = popen("wl-paste -n", "r");
-        if (!pipe) return std::nullopt;
-        std::string result;
-        char buffer[128];
-        while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-            result += buffer;
+        if (!is_session_ready) return std::nullopt;
+
+        GError* error = nullptr;
+        GUnixFDList *out_fd_list = nullptr;
+        GVariant *result = g_dbus_connection_call_with_unix_fd_list_sync(
+            connection,
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.Clipboard",
+            "SelectionRead",
+            g_variant_new("(os)", session_handle.c_str(), "text/plain;charset=utf-8"),
+            G_VARIANT_TYPE("(h)"),
+            G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            nullptr,
+            &out_fd_list,
+            nullptr,
+            &error
+        );
+
+        if (error) {
+            // Note: Normal if the clipboard is empty or type not available.
+            g_error_free(error);
+            return std::nullopt;
         }
-        if (pclose(pipe) != 0 && result.empty()) return std::nullopt;
-        return result;
+
+        gint handle_index;
+        g_variant_get(result, "(h)", &handle_index);
+        int fd = g_unix_fd_list_get(out_fd_list, handle_index, nullptr);
+
+        std::string data;
+        if (fd >= 0) {
+            char buffer[1024];
+            ssize_t bytes_read;
+            while ((bytes_read = read(fd, buffer, sizeof(buffer))) > 0) {
+                data.append(buffer, bytes_read);
+            }
+            close(fd);
+        }
+        
+        if (out_fd_list) g_object_unref(out_fd_list);
+        if (result) g_variant_unref(result);
+
+        return data;
     }
 
     bool SetClipboardFiles(const std::vector<std::string>& files) override {
-        FILE* pipe = popen("wl-copy -t text/uri-list", "w");
-        if (!pipe) return false;
+        if (!is_session_ready) return false;
+
+        std::string payload;
         for (const auto& file : files) {
-            std::string uri = "file://" + file + "\r\n";
-            fwrite(uri.data(), 1, uri.size(), pipe);
+            payload += "file://" + file + "\r\n";
         }
-        return pclose(pipe) == 0;
+
+        {
+            std::lock_guard<std::mutex> lock(clipboard_mutex);
+            m_clipboardData["text/uri-list"] = payload;
+        }
+
+        GVariantBuilder options;
+        g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);
+        
+        GVariantBuilder mime_builder;
+        g_variant_builder_init(&mime_builder, G_VARIANT_TYPE_STRING_ARRAY);
+        g_variant_builder_add(&mime_builder, "s", "text/uri-list");
+        
+        g_variant_builder_add(&options, "{sv}", "mime_types", g_variant_builder_end(&mime_builder));
+
+        GError* error = nullptr;
+        GVariant* result = g_dbus_connection_call_sync(
+            connection,
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.Clipboard",
+            "SetSelection",
+            g_variant_new("(oa{sv})", session_handle.c_str(), &options),
+            nullptr,
+            G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            nullptr,
+            &error
+        );
+
+        if (error) {
+            std::cerr << "Failed to SetSelection (Clipboard Files): " << error->message << std::endl;
+            g_error_free(error);
+            return false;
+        }
+        if (result) g_variant_unref(result);
+        return true;
     }
 
     std::optional<std::vector<std::string>> GetClipboardFiles() override {
-        FILE* pipe = popen("wl-paste -t text/uri-list", "r");
-        if (!pipe) return std::nullopt;
+        if (!is_session_ready) return std::nullopt;
+
+        GError* error = nullptr;
+        GUnixFDList *out_fd_list = nullptr;
+        GVariant *result = g_dbus_connection_call_with_unix_fd_list_sync(
+            connection,
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.Clipboard",
+            "SelectionRead",
+            g_variant_new("(os)", session_handle.c_str(), "text/uri-list"),
+            G_VARIANT_TYPE("(h)"),
+            G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            nullptr,
+            &out_fd_list,
+            nullptr,
+            &error
+        );
+
+        if (error) {
+            g_error_free(error);
+            return std::nullopt;
+        }
+
+        gint handle_index;
+        g_variant_get(result, "(h)", &handle_index);
+        int fd = g_unix_fd_list_get(out_fd_list, handle_index, nullptr);
+
+        std::string data;
+        if (fd >= 0) {
+            char buffer[1024];
+            ssize_t bytes_read;
+            while ((bytes_read = read(fd, buffer, sizeof(buffer))) > 0) {
+                data.append(buffer, bytes_read);
+            }
+            close(fd);
+        }
+        
+        if (out_fd_list) g_object_unref(out_fd_list);
+        if (result) g_variant_unref(result);
+
+        if (data.empty()) return std::nullopt;
+
         std::vector<std::string> files;
-        char buffer[1024];
-        while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-            std::string line = buffer;
-            if (!line.empty() && line.back() == '\n') line.pop_back();
+        std::istringstream stream(data);
+        std::string line;
+        while (std::getline(stream, line)) {
             if (!line.empty() && line.back() == '\r') line.pop_back();
             const std::string prefix = "file://";
             if (line.compare(0, prefix.size(), prefix) == 0) {
                 files.push_back(line.substr(prefix.size()));
             }
         }
-        pclose(pipe);
+
         return files.empty() ? std::nullopt : std::make_optional(files);
     }
 
@@ -139,6 +292,90 @@ class PlatformInputLinux : public IPlatformInput {
         return ok;
     }
 
+    static void OnClipboardSelectionTransfer(GDBusConnection* connection, const gchar* sender_name,
+        const gchar* object_path, const gchar* interface_name,
+        const gchar* signal_name, GVariant* parameters, gpointer user_data) {
+        
+        PlatformInputLinux* self = static_cast<PlatformInputLinux*>(user_data);
+        const gchar* session_handle = nullptr;
+        const gchar* mime_type = nullptr;
+        guint32 serial = 0;
+
+        g_variant_get(parameters, "(&o&su)", &session_handle, &mime_type, &serial);
+
+        if (self->session_handle != session_handle) return;
+
+        std::string mime(mime_type);
+        std::string data_to_send;
+        {
+            std::lock_guard<std::mutex> lock(self->clipboard_mutex);
+            auto it = self->m_clipboardData.find(mime);
+            if (it != self->m_clipboardData.end()) {
+                data_to_send = it->second;
+            }
+        }
+
+        if (data_to_send.empty()) {
+            g_dbus_connection_call_sync(
+                self->connection, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.Clipboard", "SelectionWriteDone",
+                g_variant_new("(oub)", self->session_handle.c_str(), serial, FALSE),
+                nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr
+            );
+            return;
+        }
+
+        // Call SelectionWrite
+        GError* error = nullptr;
+        GUnixFDList *out_fd_list = nullptr;
+        GVariant *result = g_dbus_connection_call_with_unix_fd_list_sync(
+            self->connection,
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.Clipboard",
+            "SelectionWrite",
+            g_variant_new("(ou)", self->session_handle.c_str(), serial),
+            G_VARIANT_TYPE("(h)"),
+            G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            nullptr,
+            &out_fd_list,
+            nullptr,
+            &error
+        );
+
+        if (error) {
+            std::cerr << "Failed to call SelectionWrite: " << error->message << std::endl;
+            g_error_free(error);
+            g_dbus_connection_call_sync(
+                self->connection, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.Clipboard", "SelectionWriteDone",
+                g_variant_new("(oub)", self->session_handle.c_str(), serial, FALSE),
+                nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr
+            );
+            return;
+        }
+
+        gint handle_index;
+        g_variant_get(result, "(h)", &handle_index);
+        int fd = g_unix_fd_list_get(out_fd_list, handle_index, nullptr);
+        
+        if (fd >= 0) {
+            write(fd, data_to_send.data(), data_to_send.size());
+            close(fd);
+        }
+        
+        if (out_fd_list) g_object_unref(out_fd_list);
+        if (result) g_variant_unref(result);
+
+        g_dbus_connection_call_sync(
+            self->connection, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.Clipboard", "SelectionWriteDone",
+            g_variant_new("(oub)", self->session_handle.c_str(), serial, TRUE),
+            nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr
+        );
+    }
+
     static void OnPortalResponse(GDBusConnection* connection, const gchar* sender_name,
         const gchar* object_path, const gchar* interface_name,
         const gchar* signal_name, GVariant* parameters, gpointer user_data) {
@@ -155,12 +392,32 @@ class PlatformInputLinux : public IPlatformInput {
                 if (session_path) {
                     std::cout << "Portal session created! Session path: " << session_path << std::endl;
                     self->session_handle = session_path;
-                    SelectDevices(self);
+                    RequestClipboard(self);
                 }
             } else {
                 std::cerr << "Portal session creation denied. Response: " << response << std::endl;
                 self->session_cv.notify_all();
             }
+        } else if (g_str_has_suffix(object_path, "clipboardReq")) {
+            if (response == 0) {
+                std::cout << "Clipboard access granted." << std::endl;
+                // Setup the signal for requested read data
+                self->clipboard_signal_id = g_dbus_connection_signal_subscribe(
+                    self->connection,
+                    "org.freedesktop.portal.Desktop",
+                    "org.freedesktop.portal.Clipboard",
+                    "SelectionTransfer",
+                    "/org/freedesktop/portal/desktop",
+                    nullptr,
+                    G_DBUS_SIGNAL_FLAGS_NONE,
+                    OnClipboardSelectionTransfer,
+                    self,
+                    nullptr
+                );
+            } else {
+                std::cerr << "Clipboard access denied. Continuing without clipboard. Response: " << response << std::endl;
+            }
+            SelectDevices(self);
         } else if (g_str_has_suffix(object_path, "selectReq")) {
             if (response == 0) {
                 std::cout << "SelectDevices completed successfully." << std::endl;
@@ -219,6 +476,40 @@ class PlatformInputLinux : public IPlatformInput {
             g_variant_get(start_result, "(&o)", &request_path);
             std::cout << "Start requested successfully. Request path: " << request_path << std::endl;
             g_variant_unref(start_result);
+        }
+    }
+
+    static void RequestClipboard(PlatformInputLinux* self) {
+        GError* error = nullptr;
+        std::cout << "Calling RequestClipboard on session " << self->session_handle << "..." << std::endl;
+
+        GVariantBuilder builder;
+        g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
+        g_variant_builder_add(&builder, "{sv}", "handle_token", g_variant_new_string("clipboardReq"));
+
+        GVariant* result = g_dbus_connection_call_sync(
+            self->connection,
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.Clipboard",
+            "RequestClipboard",
+            g_variant_new("(oa{sv})", self->session_handle.c_str(), &builder),
+            G_VARIANT_TYPE("(o)"),
+            G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            nullptr,
+            &error
+        );
+
+        if (error) {
+            std::cerr << "Failed to RequestClipboard: " << error->message << std::endl;
+            g_error_free(error);
+            SelectDevices(self); // Resume execution sequence anyway
+        } else {
+            const gchar* request_path = nullptr;
+            g_variant_get(result, "(&o)", &request_path);
+            std::cout << "RequestClipboard returned request path: " << request_path << std::endl;
+            g_variant_unref(result);
         }
     }
 
