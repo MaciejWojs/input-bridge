@@ -50,6 +50,11 @@ class IPlatformInput {
     virtual void ScrollMouse(int32_t delta) {} // optional
     virtual void TypeCharacter(uint32_t charCode) {} // optional
 
+    // Optional input detection support.
+    virtual bool StartInputDetection() { return false; }
+    virtual void StopInputDetection() {}
+    virtual std::vector<InputEvent> DrainDetectedInputEvents() { return {}; }
+
     // Default implementation that executes a batch of events in order. Platform-specific backends can override this for optimization.
     virtual void ExecuteEvents(const std::vector<InputEvent>& events) {
         for (const auto& event : events) {

@@ -22,4 +22,16 @@ class PlatformInputStub : public IPlatformInput {
     void ScrollMouse(int32_t delta) override {
         // NotImplemented
     }
+
+    bool StartInputDetection() override {
+        return false;
+    }
+
+    void StopInputDetection() override {
+        // NotImplemented
+    }
+
+    std::vector<InputEvent> DrainDetectedInputEvents() override {
+        return {};
+    }
 };

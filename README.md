@@ -12,6 +12,7 @@ Native Node.js addon for simulating hardware input events on Windows and Linux. 
 - Mouse button clicks and wheel scrolling
 - Raw keyboard events and typed Unicode text
 - DOM `KeyboardEvent.code` mapping via `keyPressDOM()`
+- Continuous native input detection with a drainable event queue
 - Movement optimization via `optimizeMouseMovesRelative()` and `optimizeMouseMovesAbsolute()`
 - Optional native logger callback from the addon
 
@@ -49,6 +50,9 @@ bridge.flush();
 - `optimizeMouseMovesAbsolute(distanceThreshold)` - reduce buffered absolute move events
 - `toggleOptimization()` - enable/disable internal mouse move optimization
 - `flush()` - execute all queued input events
+- `startInputDetection()` - start continuous native input detection
+- `stopInputDetection()` - stop continuous native input detection
+- `pollDetectedInput()` - retrieve detected native input events from the native queue
 - `setLogger(callback)` - receive native backend log messages
 
 ## Build and development

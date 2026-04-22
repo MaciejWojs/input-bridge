@@ -40,6 +40,9 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
             InstanceMethod("optimizeMouseMovesAbsolute", &InputBridge::OptimizeMouseMovesAbsolute),
             InstanceMethod("toggleOptimization", &InputBridge::ToggleOptimization),
             InstanceMethod("flush", &InputBridge::Flush),
+            InstanceMethod("startInputDetection", &InputBridge::StartInputDetection),
+            InstanceMethod("stopInputDetection", &InputBridge::StopInputDetection),
+            InstanceMethod("pollDetectedInput", &InputBridge::PollDetectedInput),
             InstanceMethod("setLogger", &InputBridge::SetLogger)
             });
 
@@ -139,6 +142,37 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
         return info.Env().Undefined();
     }
 
+    static Napi::Object ConvertDetectedEvent(Napi::Env env, const InputEvent& event) {
+        Napi::Object object = Napi::Object::New(env);
+        std::visit([&](auto&& ev) {
+            using T = std::decay_t<decltype(ev)>;
+            if constexpr (std::is_same_v<T, struct MouseMoveRelative>) {
+                object.Set("type", "mouseMoveRelative");
+                object.Set("x", ev.x);
+                object.Set("y", ev.y);
+            } else if constexpr (std::is_same_v<T, struct MouseMoveAbsolute>) {
+                object.Set("type", "mouseMoveAbsolute");
+                object.Set("x", ev.x);
+                object.Set("y", ev.y);
+            } else if constexpr (std::is_same_v<T, struct MouseClick>) {
+                object.Set("type", "mouseClick");
+                object.Set("button", ev.button);
+                object.Set("down", ev.down);
+            } else if constexpr (std::is_same_v<T, struct KeyPress>) {
+                object.Set("type", "keyPress");
+                object.Set("keyCode", ev.keyCode);
+                object.Set("down", ev.down);
+            } else if constexpr (std::is_same_v<T, struct MouseScroll>) {
+                object.Set("type", "mouseScroll");
+                object.Set("delta", ev.delta);
+            } else if constexpr (std::is_same_v<T, struct TypeCharacter>) {
+                object.Set("type", "typeCharacter");
+                object.Set("charCode", ev.charCode);
+            }
+            }, event);
+        return object;
+    }
+
     Napi::Value MoveMouseRelative(const Napi::CallbackInfo& info) {
         if (info.Length() < 2 || !info[0].IsNumber() || !info[1].IsNumber()) {
             Napi::TypeError::New(info.Env(), "Expected x and y as numbers").ThrowAsJavaScriptException();
@@ -209,7 +243,7 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
             char16_t c = str[i];
             uint32_t codepoint = c;
             if (c >= 0xD800 && c <= 0xDBFF && i + 1 < str.length()) { // high surrogate
-                char16_t low = str[i+1];
+                char16_t low = str[i + 1];
                 if (low >= 0xDC00 && low <= 0xDFFF) { // low surrogate
                     codepoint = 0x10000 + ((c - 0xD800) << 10) + (low - 0xDC00);
                     i += 2;
@@ -250,6 +284,35 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
     Napi::Value Flush(const Napi::CallbackInfo& info) {
         m_queue.Flush();
         return info.Env().Undefined();
+    }
+
+    Napi::Value StartInputDetection(const Napi::CallbackInfo& info) {
+        bool enabled = false;
+        if (m_queue.GetPlatform()) {
+            enabled = m_queue.GetPlatform()->StartInputDetection();
+        }
+        return Napi::Boolean::New(info.Env(), enabled);
+    }
+
+    Napi::Value StopInputDetection(const Napi::CallbackInfo& info) {
+        if (m_queue.GetPlatform()) {
+            m_queue.GetPlatform()->StopInputDetection();
+        }
+        return info.Env().Undefined();
+    }
+
+    Napi::Value PollDetectedInput(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        Napi::Array output = Napi::Array::New(env);
+        if (!m_queue.GetPlatform()) {
+            return output;
+        }
+
+        auto events = m_queue.GetPlatform()->DrainDetectedInputEvents();
+        for (size_t i = 0; i < events.size(); ++i) {
+            output.Set(i, ConvertDetectedEvent(env, events[i]));
+        }
+        return output;
     }
 };
 
