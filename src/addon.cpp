@@ -40,7 +40,11 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
             InstanceMethod("optimizeMouseMovesAbsolute", &InputBridge::OptimizeMouseMovesAbsolute),
             InstanceMethod("toggleOptimization", &InputBridge::ToggleOptimization),
             InstanceMethod("flush", &InputBridge::Flush),
-            InstanceMethod("setLogger", &InputBridge::SetLogger)
+            InstanceMethod("setLogger", &InputBridge::SetLogger),
+            InstanceMethod("setClipboardText", &InputBridge::SetClipboardText),
+            InstanceMethod("getClipboardText", &InputBridge::GetClipboardText),
+            InstanceMethod("setClipboardFiles", &InputBridge::SetClipboardFiles),
+            InstanceMethod("getClipboardFiles", &InputBridge::GetClipboardFiles)
             });
 
         auto* constructor = new Napi::FunctionReference();
@@ -49,6 +53,51 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
 
         exports.Set("InputBridge", func);
         return exports;
+    }
+
+    // Clipboard: setClipboardText(text: string): boolean
+    Napi::Value SetClipboardText(const Napi::CallbackInfo& info) {
+        if (info.Length() < 1 || !info[0].IsString()) {
+            Napi::TypeError::New(info.Env(), "Expected text as string").ThrowAsJavaScriptException();
+            return info.Env().Undefined();
+        }
+        bool ok = m_queue.GetPlatform()->SetClipboardText(info[0].As<Napi::String>().Utf8Value());
+        return Napi::Boolean::New(info.Env(), ok);
+    }
+
+    // Clipboard: getClipboardText(): string | null
+    Napi::Value GetClipboardText(const Napi::CallbackInfo& info) {
+        auto result = m_queue.GetPlatform()->GetClipboardText();
+        if (!result) return info.Env().Null();
+        return Napi::String::New(info.Env(), *result);
+    }
+
+    // Clipboard: setClipboardFiles(paths: string[]): boolean
+    Napi::Value SetClipboardFiles(const Napi::CallbackInfo& info) {
+        if (info.Length() < 1 || !info[0].IsArray()) {
+            Napi::TypeError::New(info.Env(), "Expected array of file paths").ThrowAsJavaScriptException();
+            return info.Env().Undefined();
+        }
+        Napi::Array arr = info[0].As<Napi::Array>();
+        std::vector<std::string> paths;
+        for (uint32_t i = 0; i < arr.Length(); ++i) {
+            Napi::Value v = arr[i];
+            if (!v.IsString()) continue;
+            paths.push_back(v.As<Napi::String>().Utf8Value());
+        }
+        bool ok = m_queue.GetPlatform()->SetClipboardFiles(paths);
+        return Napi::Boolean::New(info.Env(), ok);
+    }
+
+    // Clipboard: getClipboardFiles(): string[] | null
+    Napi::Value GetClipboardFiles(const Napi::CallbackInfo& info) {
+        auto result = m_queue.GetPlatform()->GetClipboardFiles();
+        if (!result) return info.Env().Null();
+        Napi::Array arr = Napi::Array::New(info.Env(), result->size());
+        for (size_t i = 0; i < result->size(); ++i) {
+            arr[i] = Napi::String::New(info.Env(), (*result)[i]);
+        }
+        return arr;
     }
 
     class InitWorker : public Napi::AsyncWorker {
@@ -209,7 +258,7 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
             char16_t c = str[i];
             uint32_t codepoint = c;
             if (c >= 0xD800 && c <= 0xDBFF && i + 1 < str.length()) { // high surrogate
-                char16_t low = str[i+1];
+                char16_t low = str[i + 1];
                 if (low >= 0xDC00 && low <= 0xDFFF) { // low surrogate
                     codepoint = 0x10000 + ((c - 0xD800) << 10) + (low - 0xDC00);
                     i += 2;

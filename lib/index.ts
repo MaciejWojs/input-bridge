@@ -10,6 +10,64 @@ const __dirname = path.dirname(__filename);
  * Actions are queued and must be dispatched using `flush()`.
  */
 export interface IInputBridge {
+
+    /**
+     * Sets the clipboard text (Unicode string).
+     *
+     * @param text - The text to set to the clipboard.
+     * @returns `true` if successful, `false` otherwise.
+     *
+     * @platform Windows: Supported. Linux: Not implemented.
+     *
+     * @example
+     * ```typescript
+     * bridge.setClipboardText("Hello!");
+     * ``` 
+     */
+    setClipboardText(text: string): boolean;
+
+    /**
+     * Gets the current clipboard text (Unicode string).
+     *
+     * @returns The clipboard text, or `null` if unavailable or not text.
+     *
+     * @platform Windows: Supported. Linux: Not implemented.
+     *
+     * @example
+     * ```typescript
+     * const text = bridge.getClipboardText();
+     * ```
+     */
+    getClipboardText(): string | null;
+
+    /**
+     * Sets the clipboard to contain a list of files (file paths).
+     *
+     * @param filePaths - Array of absolute file paths to set to the clipboard.
+     * @returns `true` if successful, `false` otherwise.
+     *
+     * @platform Windows: Supported. Linux: Not implemented.
+     *
+     * @example
+     * ```typescript
+     * bridge.setClipboardFiles(["C:/foo.txt", "C:/bar.png"]);
+     * ```
+     */
+    setClipboardFiles(filePaths: string[]): boolean;
+
+    /**
+     * Gets the list of file paths from the clipboard (if clipboard contains files).
+     *
+     * @returns Array of file paths, or `null` if unavailable or clipboard does not contain files.
+     *
+     * @platform Windows: Supported. Linux: Not implemented.
+     *
+     * @example
+     * ```typescript
+     * const files = bridge.getClipboardFiles();
+     * ```
+     */
+    getClipboardFiles(): string[] | null;
     /**
      * Asynchronously initializes the native input bridge.
      * On Linux (Wayland), this requests a RemoteDesktop portal session and waits
@@ -231,6 +289,8 @@ export interface InputBridgeOptions {
  * to execute queued input actions on the system.
  */
 export class InputBridge implements IInputBridge {
+
+
     private nativeBridge: IInputBridge;
     public autoFlush: boolean;
 
@@ -243,56 +303,56 @@ export class InputBridge implements IInputBridge {
         return this.nativeBridge.init();
     }
 
-    moveMouseRelative(x: number, y: number): void { 
-        this.nativeBridge.moveMouseRelative(x, y); 
+    moveMouseRelative(x: number, y: number): void {
+        this.nativeBridge.moveMouseRelative(x, y);
         if (this.autoFlush) this.flush();
     }
-    
-    moveMouseAbsolute(x: number, y: number): void { 
-        this.nativeBridge.moveMouseAbsolute(x, y); 
+
+    moveMouseAbsolute(x: number, y: number): void {
+        this.nativeBridge.moveMouseAbsolute(x, y);
         if (this.autoFlush) this.flush();
     }
-    
-    mouseClick(button: number, down: boolean): void { 
-        this.nativeBridge.mouseClick(button, down); 
+
+    mouseClick(button: number, down: boolean): void {
+        this.nativeBridge.mouseClick(button, down);
         if (this.autoFlush) this.flush();
     }
-    
-    keyPress(keyCode: number, down: boolean): void { 
-        this.nativeBridge.keyPress(keyCode, down); 
+
+    keyPress(keyCode: number, down: boolean): void {
+        this.nativeBridge.keyPress(keyCode, down);
         if (this.autoFlush) this.flush();
     }
-    
-    scrollMouse(delta: number): void { 
-        this.nativeBridge.scrollMouse(delta); 
+
+    scrollMouse(delta: number): void {
+        this.nativeBridge.scrollMouse(delta);
         if (this.autoFlush) this.flush();
     }
-    
-    typeString(text: string): void { 
-        this.nativeBridge.typeString(text); 
+
+    typeString(text: string): void {
+        this.nativeBridge.typeString(text);
         if (this.autoFlush) this.flush();
     }
-    
-    optimizeMouseMovesRelative(distanceThreshold: number): void { 
-        this.nativeBridge.optimizeMouseMovesRelative(distanceThreshold); 
+
+    optimizeMouseMovesRelative(distanceThreshold: number): void {
+        this.nativeBridge.optimizeMouseMovesRelative(distanceThreshold);
         // Config change, doesn't need flush
     }
-    
-    optimizeMouseMovesAbsolute(distanceThreshold: number): void { 
+
+    optimizeMouseMovesAbsolute(distanceThreshold: number): void {
         this.nativeBridge.optimizeMouseMovesAbsolute(distanceThreshold);
         // Config change, doesn't need flush
     }
-    
-    toggleOptimization(): boolean { 
-        return this.nativeBridge.toggleOptimization(); 
+
+    toggleOptimization(): boolean {
+        return this.nativeBridge.toggleOptimization();
     }
-    
-    flush(): void { 
-        this.nativeBridge.flush(); 
+
+    flush(): void {
+        this.nativeBridge.flush();
     }
-    
-    setLogger(callback: (msg: string) => void): void { 
-        this.nativeBridge.setLogger(callback); 
+
+    setLogger(callback: (msg: string) => void): void {
+        this.nativeBridge.setLogger(callback);
     }
 
     keyPressDOM(domCode: string, down: boolean): boolean {
@@ -303,6 +363,22 @@ export class InputBridge implements IInputBridge {
             return true;
         }
         return false;
+    }
+
+    setClipboardText(text: string): boolean {
+        return this.nativeBridge.setClipboardText(text);
+    }
+
+    getClipboardText(): string | null {
+        return this.nativeBridge.getClipboardText();
+    }
+
+    setClipboardFiles(filePaths: string[]): boolean {
+        return this.nativeBridge.setClipboardFiles(filePaths);
+    }
+
+    getClipboardFiles(): string[] | null {
+        return this.nativeBridge.getClipboardFiles();
     }
 }
 

@@ -13,17 +13,23 @@
 #include <dlfcn.h>
 
 class PlatformInputLinux : public IPlatformInput {
+
+    bool SetClipboardText(const std::string&) override { return false; }
+    std::optional<std::string> GetClipboardText() override { return std::nullopt; }
+    bool SetClipboardFiles(const std::vector<std::string>&) override { return false; }
+    std::optional<std::vector<std::string>> GetClipboardFiles() override { return std::nullopt; }
+
     private:
     GDBusConnection* connection = nullptr;
     std::string session_handle;
     bool is_session_ready = false;
     bool m_batchMode = false;
-    
+
     GMainLoop* main_loop = nullptr;
     std::thread loop_thread;
-    std::atomic<bool> is_running{false};
+    std::atomic<bool> is_running{ false };
     guint response_signal_id = 0;
-    
+
     std::mutex session_mutex;
     std::condition_variable session_cv;
 
@@ -83,9 +89,9 @@ class PlatformInputLinux : public IPlatformInput {
         return ok;
     }
 
-    static void OnPortalResponse(GDBusConnection *connection, const gchar *sender_name,
-                                 const gchar *object_path, const gchar *interface_name,
-                                 const gchar *signal_name, GVariant *parameters, gpointer user_data) {
+    static void OnPortalResponse(GDBusConnection* connection, const gchar* sender_name,
+        const gchar* object_path, const gchar* interface_name,
+        const gchar* signal_name, GVariant* parameters, gpointer user_data) {
         guint32 response;
         GVariant* results = nullptr;
         g_variant_get(parameters, "(u@a{sv})", &response, &results);
@@ -126,7 +132,7 @@ class PlatformInputLinux : public IPlatformInput {
                 self->session_cv.notify_all();
             }
         }
-        
+
         if (results) {
             g_variant_unref(results);
         }
@@ -172,8 +178,8 @@ class PlatformInputLinux : public IPlatformInput {
 
         GVariantBuilder builder;
         g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
-        
-        uint32_t types = 3; 
+
+        uint32_t types = 3;
 
         g_variant_builder_add(&builder, "{sv}", "types", g_variant_new_uint32(types));
         g_variant_builder_add(&builder, "{sv}", "handle_token", g_variant_new_string("selectReq"));
@@ -218,7 +224,7 @@ class PlatformInputLinux : public IPlatformInput {
         is_running = true;
         loop_thread = std::thread([this]() {
             g_main_loop_run(this->main_loop);
-        });
+            });
 
         // Subscribe to the Response signal IMMEDIATELY so we don't miss the portal reply
         response_signal_id = g_dbus_connection_signal_subscribe(
@@ -239,8 +245,8 @@ class PlatformInputLinux : public IPlatformInput {
         g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
         g_variant_builder_add(&builder, "{sv}", "session_handle_token", g_variant_new_string("inputbridgesession"));
         g_variant_builder_add(&builder, "{sv}", "handle_token", g_variant_new_string("createReq"));
-        
-        
+
+
         // Call CreateSession
         std::cout << "Requesting RemoteDesktop session..." << std::endl;
         GVariant* result = g_dbus_connection_call_sync(
@@ -266,7 +272,7 @@ class PlatformInputLinux : public IPlatformInput {
             g_variant_get(result, "(&o)", &request_path);
             std::cout << "CreateSession requested successfully. Request path: " << request_path << std::endl;
             g_variant_unref(result);
-            
+
             // Waiting for the portal authorization chain to complete (requires system or user action), max 10 seconds
             std::cout << "Waiting (max 10 seconds) for the Portal session to start and external permissions to be granted..." << std::endl;
             std::unique_lock<std::mutex> lock(session_mutex);
@@ -281,7 +287,7 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     public:
-    
+
     PlatformInputLinux() {
         // This object will initialize the session via Async Init
     }
@@ -407,7 +413,7 @@ class PlatformInputLinux : public IPlatformInput {
         g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
 
         uint32_t state = down ? 1 : 0;
-        uint32_t linux_button = 0x110; 
+        uint32_t linux_button = 0x110;
         if (button == 1) linux_button = 0x111;
         else if (button == 2) linux_button = 0x112;
 
@@ -465,8 +471,8 @@ class PlatformInputLinux : public IPlatformInput {
 
         // Check if we received the raw Linux portal field marker
         if ((keyCode & FLAG_RAW_MASK) == FLAG_RAW_LINUX) {
-            evdev_code = keyCode & ~FLAG_RAW_MASK; 
-        } 
+            evdev_code = keyCode & ~FLAG_RAW_MASK;
+        }
         // Or if this is raw Windows code that must be translated to Linux for this module
         else if ((keyCode & FLAG_RAW_MASK) == FLAG_RAW_WINDOWS) {
             evdev_code = KeyTranslator::WindowsToLinux(keyCode & ~FLAG_RAW_MASK);
@@ -525,97 +531,97 @@ class PlatformInputLinux : public IPlatformInput {
         );
     }
 
-   void TypeCharacter(uint32_t charCode) override {
-    if (!is_session_ready) return;
+    void TypeCharacter(uint32_t charCode) override {
+        if (!is_session_ready) return;
 
-    uint32_t codepoint = static_cast<uint32_t>(charCode);
-    
-    auto send_key = [&](uint32_t evdev, bool down) {
-        GVariantBuilder options_builder;
-        g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
-        GVariant* result = g_dbus_connection_call_sync(
-            connection,
-            "org.freedesktop.portal.Desktop",
-            "/org/freedesktop/portal/desktop",
-            "org.freedesktop.portal.RemoteDesktop",
-            "NotifyKeyboardKeycode",
-            g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder, (int32_t)evdev, down ? 1 : 0),
-            nullptr,
-            G_DBUS_CALL_FLAGS_NONE,
-            -1,
-            nullptr,
-            nullptr
-        );
-        if (result) g_variant_unref(result);
-        std::this_thread::sleep_for(std::chrono::milliseconds(4));
-    };
+        uint32_t codepoint = static_cast<uint32_t>(charCode);
 
-    auto tap_key = [&](uint32_t evdev) {
-        send_key(evdev, true);
-        send_key(evdev, false);
-    };
+        auto send_key = [&](uint32_t evdev, bool down) {
+            GVariantBuilder options_builder;
+            g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
+            GVariant* result = g_dbus_connection_call_sync(
+                connection,
+                "org.freedesktop.portal.Desktop",
+                "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.RemoteDesktop",
+                "NotifyKeyboardKeycode",
+                g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder, (int32_t)evdev, down ? 1 : 0),
+                nullptr,
+                G_DBUS_CALL_FLAGS_NONE,
+                -1,
+                nullptr,
+                nullptr
+            );
+            if (result) g_variant_unref(result);
+            std::this_thread::sleep_for(std::chrono::milliseconds(4));
+            };
 
-    if (codepoint == 0x0D || codepoint == 0x0A) { tap_key(28); return; } // Enter
-    if (codepoint == 0x08) { tap_key(14); return; } // Backspace
-    if (codepoint == 0x09) { tap_key(15); return; } // Tab
-    if (codepoint == 0x20) { tap_key(57); return; } // Space
+        auto tap_key = [&](uint32_t evdev) {
+            send_key(evdev, true);
+            send_key(evdev, false);
+            };
 
-    // Fallback: NotifyKeyboardKeysym usually works well for basic ASCII
-    if (codepoint >= 0x20 && codepoint <= 0x7E) {
-        GVariantBuilder options_builder1;
-        g_variant_builder_init(&options_builder1, G_VARIANT_TYPE_VARDICT);
-        g_dbus_connection_call_sync(connection, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
-            "org.freedesktop.portal.RemoteDesktop", "NotifyKeyboardKeysym",
-            g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder1, (int32_t)codepoint, 1),
-            nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr);
-            
-        GVariantBuilder options_builder2;
-        g_variant_builder_init(&options_builder2, G_VARIANT_TYPE_VARDICT);
-        g_dbus_connection_call_sync(connection, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
-            "org.freedesktop.portal.RemoteDesktop", "NotifyKeyboardKeysym",
-            g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder2, (int32_t)codepoint, 0),
-            nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr);
-            
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        return;
+        if (codepoint == 0x0D || codepoint == 0x0A) { tap_key(28); return; } // Enter
+        if (codepoint == 0x08) { tap_key(14); return; } // Backspace
+        if (codepoint == 0x09) { tap_key(15); return; } // Tab
+        if (codepoint == 0x20) { tap_key(57); return; } // Space
+
+        // Fallback: NotifyKeyboardKeysym usually works well for basic ASCII
+        if (codepoint >= 0x20 && codepoint <= 0x7E) {
+            GVariantBuilder options_builder1;
+            g_variant_builder_init(&options_builder1, G_VARIANT_TYPE_VARDICT);
+            g_dbus_connection_call_sync(connection, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.RemoteDesktop", "NotifyKeyboardKeysym",
+                g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder1, (int32_t)codepoint, 1),
+                nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr);
+
+            GVariantBuilder options_builder2;
+            g_variant_builder_init(&options_builder2, G_VARIANT_TYPE_VARDICT);
+            g_dbus_connection_call_sync(connection, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.RemoteDesktop", "NotifyKeyboardKeysym",
+                g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder2, (int32_t)codepoint, 0),
+                nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr);
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            return;
+        }
+
+        // Dla znaków wykraczających poza layout (Unicode) używamy Ctrl+Shift+U + Hex + Space
+        char hex[10];
+        snprintf(hex, sizeof(hex), "%x", codepoint);
+
+        send_key(29, true); // Left Ctrl
+        send_key(42, true); // Left Shift
+        tap_key(22);        // U (evdev 22)
+        send_key(42, false);
+        send_key(29, false);
+
+        for (int i = 0; hex[i] != '\0'; i++) {
+            uint32_t evdev = 0;
+            char c = hex[i];
+            if (c == '0') evdev = 11;
+            else if (c == '1') evdev = 2;
+            else if (c == '2') evdev = 3;
+            else if (c == '3') evdev = 4;
+            else if (c == '4') evdev = 5;
+            else if (c == '5') evdev = 6;
+            else if (c == '6') evdev = 7;
+            else if (c == '7') evdev = 8;
+            else if (c == '8') evdev = 9;
+            else if (c == '9') evdev = 10;
+            else if (c == 'a') evdev = 30;
+            else if (c == 'b') evdev = 48;
+            else if (c == 'c') evdev = 46;
+            else if (c == 'd') evdev = 32;
+            else if (c == 'e') evdev = 18;
+            else if (c == 'f') evdev = 33;
+
+            if (evdev > 0) tap_key(evdev);
+        }
+
+        tap_key(57); // Space to finish
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
     }
-
-    // Dla znaków wykraczających poza layout (Unicode) używamy Ctrl+Shift+U + Hex + Space
-    char hex[10];
-    snprintf(hex, sizeof(hex), "%x", codepoint);
-    
-    send_key(29, true); // Left Ctrl
-    send_key(42, true); // Left Shift
-    tap_key(22);        // U (evdev 22)
-    send_key(42, false);
-    send_key(29, false);
-
-    for (int i = 0; hex[i] != '\0'; i++) {
-        uint32_t evdev = 0;
-        char c = hex[i];
-        if (c == '0') evdev = 11;
-        else if (c == '1') evdev = 2;
-        else if (c == '2') evdev = 3;
-        else if (c == '3') evdev = 4;
-        else if (c == '4') evdev = 5;
-        else if (c == '5') evdev = 6;
-        else if (c == '6') evdev = 7;
-        else if (c == '7') evdev = 8;
-        else if (c == '8') evdev = 9;
-        else if (c == '9') evdev = 10;
-        else if (c == 'a') evdev = 30;
-        else if (c == 'b') evdev = 48;
-        else if (c == 'c') evdev = 46;
-        else if (c == 'd') evdev = 32;
-        else if (c == 'e') evdev = 18;
-        else if (c == 'f') evdev = 33;
-        
-        if (evdev > 0) tap_key(evdev);
-    }
-    
-    tap_key(57); // Space to finish
-    std::this_thread::sleep_for(std::chrono::milliseconds(25));
-}
 
     void ExecuteEvents(const std::vector<InputEvent>& events) override {
         bool previousBatchMode = m_batchMode;

@@ -41,8 +41,8 @@ static void InitOptionalXkbCommon() {
 
 namespace {
 
-KeySym EvdevToX11KeySym(int32_t evdev) {
-    switch (evdev) {
+    KeySym EvdevToX11KeySym(int32_t evdev) {
+        switch (evdev) {
         case 30: return XK_a;
         case 48: return XK_b;
         case 46: return XK_c;
@@ -99,21 +99,21 @@ KeySym EvdevToX11KeySym(int32_t evdev) {
         case 56: return XK_Alt_L;
         case 100: return XK_Alt_R;
         default: return NoSymbol;
-    }
-}
-
-KeySym CharToKeySym(char32_t cp, bool& needShift) {
-    needShift = false;
-
-    if (cp >= U'a' && cp <= U'z') {
-        return static_cast<KeySym>(cp);
+        }
     }
 
-    if (cp >= U'A' && cp <= U'Z') {
-        needShift = true;
-        return static_cast<KeySym>(cp + 32);
-    }
-    switch (cp) {
+    KeySym CharToKeySym(char32_t cp, bool& needShift) {
+        needShift = false;
+
+        if (cp >= U'a' && cp <= U'z') {
+            return static_cast<KeySym>(cp);
+        }
+
+        if (cp >= U'A' && cp <= U'Z') {
+            needShift = true;
+            return static_cast<KeySym>(cp + 32);
+        }
+        switch (cp) {
         case U' ': return XK_space;
         case U'\n': return XK_Return;
         case U'\r': return XK_Return;
@@ -140,19 +140,24 @@ KeySym CharToKeySym(char32_t cp, bool& needShift) {
         case U'?': needShift = true; return XK_slash;
         case U'~': needShift = true; return XK_grave;
         default: break;
-    }
+        }
 
-    if (cp <= 0x7f) {
-        return static_cast<KeySym>(cp);
-    }
+        if (cp <= 0x7f) {
+            return static_cast<KeySym>(cp);
+        }
 
-    return static_cast<KeySym>(0x01000000u | cp);
-}
+        return static_cast<KeySym>(0x01000000u | cp);
+    }
 
 } // namespace
 
 class X11PlatformInput : public IPlatformInput {
-private:
+
+    bool SetClipboardText(const std::string&) override { return false; }
+    std::optional<std::string> GetClipboardText() override { return std::nullopt; }
+    bool SetClipboardFiles(const std::vector<std::string>&) override { return false; }
+    std::optional<std::vector<std::string>> GetClipboardFiles() override { return std::nullopt; }
+    private:
     Display* m_display = nullptr;
     std::vector<KeyCode> m_scratchCodes;
     std::vector<KeySym> m_scratchSyms;
@@ -201,7 +206,7 @@ private:
         KeyCode code = m_scratchCodes[idx];
         m_scratchSyms[idx] = sym;
 
-        KeySym newSyms[2] = { sym, sym }; 
+        KeySym newSyms[2] = { sym, sym };
         XChangeKeyboardMapping(m_display, code, 2, newSyms, 1);
         XSync(m_display, False);
 
@@ -241,7 +246,7 @@ private:
         usleep(1000);
     }
 
-public:
+    public:
     X11PlatformInput() {
         m_display = XOpenDisplay(nullptr);
         if (m_display == nullptr) {
@@ -376,7 +381,7 @@ public:
             // aby uniknąć błędów wyścigów w target aplikacji
             keyCode = GetScratchForSym(keySym);
             needShift = false; // Został przypisany wprost!
-            
+
             if (keyCode == 0) {
                 fprintf(stderr, "[X11 WARN] Brak pustego przycisku dla znaku U+%04X\n", codepoint);
                 return;

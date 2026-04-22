@@ -1,7 +1,19 @@
 #include "../platform_input.hpp"
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#undef NOSHELLAPI
+#include <shellapi.h>
 #include <iostream>
 #include <string>
+
+#ifndef DROPFILES
+typedef struct _DROPFILES {
+    DWORD pFiles;
+    POINT pt;
+    BOOL fNC;
+    BOOL fWide;
+} DROPFILES;
+#endif
 
 class PlatformInputWin : public IPlatformInput {
     private:
@@ -181,5 +193,83 @@ class PlatformInputWin : public IPlatformInput {
         if (!m_winInputs.empty()) {
             SendInput(static_cast<UINT>(m_winInputs.size()), m_winInputs.data(), sizeof(INPUT));
         }
+    }
+
+    // Clipboard: Set text
+    bool SetClipboardText(const std::string& text) override {
+        if (!OpenClipboard(nullptr)) return false;
+        if (!EmptyClipboard()) { CloseClipboard(); return false; }
+        size_t size = (text.size() + 1) * sizeof(wchar_t);
+        HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, size);
+        if (!hMem) { CloseClipboard(); return false; }
+        wchar_t* wstr = (wchar_t*)GlobalLock(hMem);
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, wstr, (int)(size / sizeof(wchar_t)));
+        GlobalUnlock(hMem);
+        if (!SetClipboardData(CF_UNICODETEXT, hMem)) { GlobalFree(hMem); CloseClipboard(); return false; }
+        CloseClipboard();
+        return true;
+    }
+
+    // Clipboard: Get text
+    std::optional<std::string> GetClipboardText() override {
+        if (!OpenClipboard(nullptr)) return std::nullopt;
+        HANDLE hData = GetClipboardData(CF_UNICODETEXT);
+        if (!hData) { CloseClipboard(); return std::nullopt; }
+        wchar_t* wstr = (wchar_t*)GlobalLock(hData);
+        if (!wstr) { CloseClipboard(); return std::nullopt; }
+        int len = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, nullptr, 0, nullptr, nullptr);
+        std::string result(len - 1, 0);
+        WideCharToMultiByte(CP_UTF8, 0, wstr, -1, result.data(), len, nullptr, nullptr);
+        GlobalUnlock(hData);
+        CloseClipboard();
+        return result;
+    }
+
+    // Clipboard: Set files (CF_HDROP)
+    bool SetClipboardFiles(const std::vector<std::string>& filePaths) override {
+        if (!OpenClipboard(nullptr)) return false;
+        if (!EmptyClipboard()) { CloseClipboard(); return false; }
+        // Convert UTF-8 paths to wide strings and double-null-terminated list
+        std::wstring filesConcat;
+        for (const auto& path : filePaths) {
+            int wlen = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
+            std::wstring wpath(wlen - 1, 0);
+            MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, wpath.data(), wlen);
+            filesConcat.append(wpath);
+            filesConcat.push_back(L'\0');
+        }
+        filesConcat.push_back(L'\0');
+        size_t dropfilesSize = sizeof(DROPFILES) + filesConcat.size() * sizeof(wchar_t);
+        HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, dropfilesSize);
+        if (!hMem) { CloseClipboard(); return false; }
+        DROPFILES* df = (DROPFILES*)GlobalLock(hMem);
+        df->pFiles = sizeof(DROPFILES);
+        df->pt.x = 0; df->pt.y = 0; df->fNC = FALSE; df->fWide = TRUE;
+        memcpy((BYTE*)df + sizeof(DROPFILES), filesConcat.data(), filesConcat.size() * sizeof(wchar_t));
+        GlobalUnlock(hMem);
+        if (!SetClipboardData(CF_HDROP, hMem)) { GlobalFree(hMem); CloseClipboard(); return false; }
+        CloseClipboard();
+        return true;
+    }
+
+    // Clipboard: Get files (CF_HDROP)
+    std::optional<std::vector<std::string>> GetClipboardFiles() override {
+        if (!OpenClipboard(nullptr)) return std::nullopt;
+        HANDLE hData = GetClipboardData(CF_HDROP);
+        if (!hData) { CloseClipboard(); return std::nullopt; }
+        HDROP hDrop = (HDROP)hData;
+        UINT count = DragQueryFileW(hDrop, 0xFFFFFFFF, nullptr, 0);
+        std::vector<std::string> files;
+        for (UINT i = 0; i < count; ++i) {
+            UINT len = DragQueryFileW(hDrop, i, nullptr, 0) + 1;
+            std::wstring wpath(len, 0);
+            DragQueryFileW(hDrop, i, wpath.data(), len);
+            int utf8len = WideCharToMultiByte(CP_UTF8, 0, wpath.c_str(), -1, nullptr, 0, nullptr, nullptr);
+            std::string path(utf8len - 1, 0);
+            WideCharToMultiByte(CP_UTF8, 0, wpath.c_str(), -1, path.data(), utf8len, nullptr, nullptr);
+            files.push_back(path);
+        }
+        CloseClipboard();
+        return files;
     }
 };

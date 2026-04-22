@@ -3,6 +3,22 @@
 
 class PlatformInputStub : public IPlatformInput {
     public:
+    bool SetClipboardText(const std::string&) override {
+        return false;
+    }
+
+    std::optional<std::string> GetClipboardText() override {
+        return std::nullopt;
+    }
+
+    bool SetClipboardFiles(const std::vector<std::string>&) override {
+        return false;
+    }
+
+    std::optional<std::vector<std::string>> GetClipboardFiles() override {
+        return std::nullopt;
+    }
+
     void MoveMouseRelative(int32_t x, int32_t y) override {
         // NotImplemented
     }
@@ -20,6 +36,10 @@ class PlatformInputStub : public IPlatformInput {
     }
 
     void ScrollMouse(int32_t delta) override {
+        // NotImplemented
+    }
+
+    void TypeCharacter(uint32_t charCode) override {
         // NotImplemented
     }
 };
