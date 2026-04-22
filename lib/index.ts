@@ -16,6 +16,7 @@ export interface IInputBridge {
      *
      * @param text - The text to set to the clipboard.
      * @returns `true` if successful, `false` otherwise.
+     * @throws {TypeError} If `text` is not a string.
      *
      * @platform Windows: Supported. Linux: Not implemented.
      *
@@ -45,6 +46,7 @@ export interface IInputBridge {
      *
      * @param filePaths - Array of absolute file paths to set to the clipboard.
      * @returns `true` if successful, `false` otherwise.
+     * @throws {TypeError} If `filePaths` is not an array of strings.
      *
      * @platform Windows: Supported. Linux: Not implemented.
      *
@@ -75,6 +77,7 @@ export interface IInputBridge {
      * 
      * @param filePaths - Array of absolute file paths to send remotely.
      * @returns `true` if the remote clipboard object was created successfully.
+     * @throws {TypeError} If `filePaths` is not an array of strings.
      * 
      * @platform Windows: Supported. Linux: Not implemented.
      */
@@ -104,6 +107,7 @@ export interface IInputBridge {
      * 
      * @param x - The relative movement on the X axis.
      * @param y - The relative movement on the Y axis.
+     * @throws {TypeError} If `x` or `y` is not a number.
      * 
      * @example
      * ```typescript
@@ -118,6 +122,7 @@ export interface IInputBridge {
      * 
      * @param x - The absolute X coordinate.
      * @param y - The absolute Y coordinate.
+     * @throws {TypeError} If `x` or `y` is not a number.
      * 
      * @example
      * ```typescript
@@ -132,6 +137,7 @@ export interface IInputBridge {
      * 
      * @param button - The mouse button (0 = left, 1 = right, 2 = middle).
      * @param down - `true` to press the button, `false` to release.
+     * @throws {TypeError} If `button` is not a number or `down` is not a boolean.
      * 
      * @example
      * ```typescript
@@ -147,6 +153,7 @@ export interface IInputBridge {
      * 
      * @param keyCode - The virtual key code of the key.
      * @param down - `true` to press the key, `false` to release.
+     * @throws {TypeError} If `keyCode` is not a number or `down` is not a boolean.
      * 
      * @example
      * ```typescript
@@ -161,6 +168,7 @@ export interface IInputBridge {
      * Queues a mouse wheel scroll event.
      * 
      * @param delta - The scroll delta amount. Positive values scroll up, negative scroll down.
+     * @throws {TypeError} If `delta` is not a number.
      * 
      * @example
      * ```typescript
@@ -174,6 +182,7 @@ export interface IInputBridge {
      * Queues a literal string of text to be typed by simulating Unicode character sequences.
      * 
      * @param text - The literal string to type.
+     * @throws {TypeError} If `text` is not a string.
      * 
      * @example
      * ```typescript
@@ -188,6 +197,7 @@ export interface IInputBridge {
      * that are closer than the given threshold.
      * 
      * @param distanceThreshold - The distance threshold in pixels.
+     * @throws {TypeError} If `distanceThreshold` is not a number.
      * 
      * @example
      * ```typescript
@@ -201,6 +211,7 @@ export interface IInputBridge {
      * that are closer than the given threshold.
      * 
      * @param distanceThreshold - The distance threshold in pixels.
+     * @throws {TypeError} If `distanceThreshold` is not a number.
      * 
      * @example
      * ```typescript
@@ -240,6 +251,7 @@ export interface IInputBridge {
      * Registers a callback to receive internal log messages from the C++ native backend.
      * 
      * @param callback - The function to call with log messages.
+     * @throws {TypeError} If `callback` is not a function.
      * 
      * @example
      * ```typescript
