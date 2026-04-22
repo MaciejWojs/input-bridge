@@ -19,6 +19,14 @@ class PlatformInputStub : public IPlatformInput {
         return std::nullopt;
     }
 
+    bool SetClipboardFilesRemote(const std::vector<std::string>&) override {
+        return false;
+    }
+
+    std::optional<std::vector<std::string>> GetClipboardFilesRemote() override {
+        return std::nullopt;
+    }
+
     void MoveMouseRelative(int32_t x, int32_t y) override {
         // NotImplemented
     }

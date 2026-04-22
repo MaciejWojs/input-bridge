@@ -3,17 +3,296 @@
 #include <windows.h>
 #undef NOSHELLAPI
 #include <shellapi.h>
+#include <shlobj.h>
+#include <objidl.h>
+#include <ole2.h>
 #include <iostream>
+#include <fstream>
 #include <string>
+#include <vector>
 
-#ifndef DROPFILES
-typedef struct _DROPFILES {
-    DWORD pFiles;
-    POINT pt;
-    BOOL fNC;
-    BOOL fWide;
-} DROPFILES;
-#endif
+static std::wstring Utf8ToWide(const std::string& utf8) {
+    if (utf8.empty()) return {};
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
+    std::wstring result(wlen - 1, 0);
+    MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, result.data(), wlen);
+    return result;
+}
+
+static std::wstring GetFileName(const std::wstring& fullPath) {
+    size_t pos = fullPath.find_last_of(L"\\/");
+    if (pos == std::wstring::npos) return fullPath;
+    return fullPath.substr(pos + 1);
+}
+
+static HGLOBAL DuplicateGlobalHandle(HGLOBAL source) {
+    if (!source) return nullptr;
+    SIZE_T size = GlobalSize(source);
+    if (!size) return nullptr;
+    HGLOBAL dest = GlobalAlloc(GMEM_MOVEABLE, size);
+    if (!dest) return nullptr;
+    void* srcPtr = GlobalLock(source);
+    void* dstPtr = GlobalLock(dest);
+    if (!srcPtr || !dstPtr) {
+        if (dstPtr) GlobalUnlock(dest);
+        if (srcPtr) GlobalUnlock(source);
+        GlobalFree(dest);
+        return nullptr;
+    }
+    memcpy(dstPtr, srcPtr, size);
+    GlobalUnlock(dest);
+    GlobalUnlock(source);
+    return dest;
+}
+
+static HGLOBAL CreateDropFilesHandle(const std::vector<std::wstring>& filePaths) {
+    std::wstring data;
+    for (const auto& path : filePaths) {
+        data.append(path);
+        data.push_back(L'\0');
+    }
+    data.push_back(L'\0');
+    SIZE_T totalSize = sizeof(DROPFILES) + data.size() * sizeof(wchar_t);
+    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, totalSize);
+    if (!hMem) return nullptr;
+    DROPFILES* df = reinterpret_cast<DROPFILES*>(GlobalLock(hMem));
+    if (!df) { GlobalFree(hMem); return nullptr; }
+    df->pFiles = sizeof(DROPFILES);
+    df->pt.x = 0;
+    df->pt.y = 0;
+    df->fNC = FALSE;
+    df->fWide = TRUE;
+    memcpy(reinterpret_cast<BYTE*>(df) + sizeof(DROPFILES), data.data(), data.size() * sizeof(wchar_t));
+    GlobalUnlock(hMem);
+    return hMem;
+}
+
+static HGLOBAL CreateGlobalFromData(const void* data, SIZE_T size) {
+    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, size);
+    if (!hMem) return nullptr;
+    void* ptr = GlobalLock(hMem);
+    if (!ptr) { GlobalFree(hMem); return nullptr; }
+    memcpy(ptr, data, size);
+    GlobalUnlock(hMem);
+    return hMem;
+}
+
+static bool ReadFileToBytes(const std::wstring& filePath, std::vector<uint8_t>& out) {
+    HANDLE file = CreateFileW(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER size;
+    if (!GetFileSizeEx(file, &size) || size.QuadPart < 0 || size.QuadPart > static_cast<LONGLONG>(SIZE_MAX)) {
+        CloseHandle(file);
+        return false;
+    }
+    out.resize(static_cast<size_t>(size.QuadPart));
+    DWORD bytesRead = 0;
+    bool ok = true;
+    if (size.QuadPart > 0) {
+        ok = ReadFile(file, out.data(), static_cast<DWORD>(size.QuadPart), &bytesRead, nullptr) != FALSE && bytesRead == static_cast<DWORD>(size.QuadPart);
+    }
+    CloseHandle(file);
+    return ok;
+}
+
+class RemoteFileDataObject : public IDataObject {
+    private:
+    LONG m_ref = 1;
+    std::vector<std::wstring> m_fullPaths;
+    std::vector<std::wstring> m_fileNames;
+    std::vector<std::vector<uint8_t>> m_fileContents;
+    HGLOBAL m_descriptorHandle = nullptr;
+    std::vector<FORMATETC> m_formats;
+    UINT m_cfFileDescriptor = 0;
+    UINT m_cfFileContents = 0;
+    UINT m_cfPreferredDropEffect = 0;
+
+    HRESULT PrepareDescriptor() {
+        size_t count = m_fileNames.size();
+        if (count == 0) return E_FAIL;
+
+        size_t descriptorSize = sizeof(FILEGROUPDESCRIPTORW) + (count - 1) * sizeof(FILEDESCRIPTORW);
+        m_descriptorHandle = GlobalAlloc(GMEM_MOVEABLE, descriptorSize);
+        if (!m_descriptorHandle) return STG_E_MEDIUMFULL;
+
+        FILEGROUPDESCRIPTORW* groupDesc = reinterpret_cast<FILEGROUPDESCRIPTORW*>(GlobalLock(m_descriptorHandle));
+        if (!groupDesc) { GlobalFree(m_descriptorHandle); m_descriptorHandle = nullptr; return STG_E_MEDIUMFULL; }
+
+        groupDesc->cItems = static_cast<UINT>(count);
+        for (size_t i = 0; i < count; ++i) {
+            FILEDESCRIPTORW& fileDesc = groupDesc->fgd[i];
+            ZeroMemory(&fileDesc, sizeof(FILEDESCRIPTORW));
+            fileDesc.dwFlags = FD_FILESIZE;
+            fileDesc.nFileSizeLow = static_cast<DWORD>(m_fileContents[i].size());
+            fileDesc.nFileSizeHigh = static_cast<DWORD>((static_cast<uint64_t>(m_fileContents[i].size()) >> 32) & 0xFFFFFFFF);
+            const std::wstring& name = m_fileNames[i];
+            wcsncpy_s(fileDesc.cFileName, name.c_str(), _TRUNCATE);
+        }
+
+        GlobalUnlock(m_descriptorHandle);
+        return S_OK;
+    }
+
+    void PrepareFormats() {
+        m_cfFileDescriptor = RegisterClipboardFormat(CFSTR_FILEDESCRIPTORW);
+        m_cfFileContents = RegisterClipboardFormat(CFSTR_FILECONTENTS);
+        m_cfPreferredDropEffect = RegisterClipboardFormat(CFSTR_PREFERREDDROPEFFECT);
+
+        m_formats.clear();
+        FORMATETC fileDescriptorFmt = { static_cast<CLIPFORMAT>(m_cfFileDescriptor), nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
+        FORMATETC fileContentsFmt = { static_cast<CLIPFORMAT>(m_cfFileContents), nullptr, DVASPECT_CONTENT, -1, TYMED_ISTREAM };
+        FORMATETC preferredDropFmt = { static_cast<CLIPFORMAT>(m_cfPreferredDropEffect), nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
+        FORMATETC hdropFmt = { CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
+
+        m_formats.push_back(fileDescriptorFmt);
+        m_formats.push_back(fileContentsFmt);
+        m_formats.push_back(preferredDropFmt);
+        m_formats.push_back(hdropFmt);
+    }
+
+    bool IsFormatSupported(FORMATETC* fmt) const {
+        if (!fmt) return false;
+        if (fmt->dwAspect != DVASPECT_CONTENT) return false;
+        if (fmt->cfFormat == static_cast<CLIPFORMAT>(m_cfFileDescriptor) && (fmt->tymed & TYMED_HGLOBAL)) return true;
+        if (fmt->cfFormat == static_cast<CLIPFORMAT>(m_cfFileContents) && (fmt->tymed & TYMED_ISTREAM)) return true;
+        if (fmt->cfFormat == static_cast<CLIPFORMAT>(m_cfPreferredDropEffect) && (fmt->tymed & TYMED_HGLOBAL)) return true;
+        if (fmt->cfFormat == CF_HDROP && (fmt->tymed & TYMED_HGLOBAL)) return true;
+        return false;
+    }
+
+    public:
+    RemoteFileDataObject(std::vector<std::wstring>&& fullPaths, std::vector<std::wstring>&& fileNames, std::vector<std::vector<uint8_t>>&& fileContents)
+        : m_fullPaths(std::move(fullPaths)), m_fileNames(std::move(fileNames)), m_fileContents(std::move(fileContents)) {
+        PrepareDescriptor();
+        PrepareFormats();
+    }
+
+    ~RemoteFileDataObject() {
+        if (m_descriptorHandle) {
+            GlobalFree(m_descriptorHandle);
+            m_descriptorHandle = nullptr;
+        }
+    }
+
+    HRESULT __stdcall QueryInterface(REFIID riid, void** ppvObject) override {
+        if (!ppvObject) return E_POINTER;
+        if (riid == IID_IUnknown || riid == IID_IDataObject) {
+            *ppvObject = static_cast<IDataObject*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppvObject = nullptr;
+        return E_NOINTERFACE;
+    }
+
+    ULONG __stdcall AddRef() override {
+        return InterlockedIncrement(&m_ref);
+    }
+
+    ULONG __stdcall Release() override {
+        ULONG count = InterlockedDecrement(&m_ref);
+        if (count == 0) delete this;
+        return count;
+    }
+
+    HRESULT __stdcall GetData(FORMATETC* pFormatEtc, STGMEDIUM* pMedium) override {
+        if (!pFormatEtc || !pMedium) return E_POINTER;
+        if (!IsFormatSupported(pFormatEtc)) return DV_E_FORMATETC;
+
+        pMedium->pUnkForRelease = nullptr;
+        pMedium->tymed = TYMED_NULL;
+        pMedium->hGlobal = nullptr;
+        pMedium->pstm = nullptr;
+
+        if (pFormatEtc->cfFormat == static_cast<CLIPFORMAT>(m_cfFileDescriptor)) {
+            if (!(pFormatEtc->tymed & TYMED_HGLOBAL)) return DV_E_TYMED;
+            if (!m_descriptorHandle) return E_FAIL;
+            HGLOBAL hCopy = DuplicateGlobalHandle(m_descriptorHandle);
+            if (!hCopy) return STG_E_MEDIUMFULL;
+            pMedium->tymed = TYMED_HGLOBAL;
+            pMedium->hGlobal = hCopy;
+            return S_OK;
+        }
+
+        if (pFormatEtc->cfFormat == static_cast<CLIPFORMAT>(m_cfFileContents)) {
+            if (!(pFormatEtc->tymed & TYMED_ISTREAM)) return DV_E_TYMED;
+            LONG index = pFormatEtc->lindex;
+            if (index < 0 || static_cast<size_t>(index) >= m_fileContents.size()) return DV_E_LINDEX;
+            const std::vector<uint8_t>& bytes = m_fileContents[static_cast<size_t>(index)];
+            HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, bytes.size());
+            if (!hMem) return STG_E_MEDIUMFULL;
+            void* ptr = GlobalLock(hMem);
+            if (!ptr) { GlobalFree(hMem); return STG_E_MEDIUMFULL; }
+            memcpy(ptr, bytes.data(), bytes.size());
+            GlobalUnlock(hMem);
+            IStream* stream = nullptr;
+            HRESULT hr = CreateStreamOnHGlobal(hMem, TRUE, &stream);
+            if (FAILED(hr)) { GlobalFree(hMem); return hr; }
+            pMedium->tymed = TYMED_ISTREAM;
+            pMedium->pstm = stream;
+            return S_OK;
+        }
+
+        if (pFormatEtc->cfFormat == static_cast<CLIPFORMAT>(m_cfPreferredDropEffect)) {
+            if (!(pFormatEtc->tymed & TYMED_HGLOBAL)) return DV_E_TYMED;
+            DWORD dropEffect = DROPEFFECT_COPY;
+            HGLOBAL hMem = CreateGlobalFromData(&dropEffect, sizeof(dropEffect));
+            if (!hMem) return STG_E_MEDIUMFULL;
+            pMedium->tymed = TYMED_HGLOBAL;
+            pMedium->hGlobal = hMem;
+            return S_OK;
+        }
+
+        if (pFormatEtc->cfFormat == CF_HDROP) {
+            if (!(pFormatEtc->tymed & TYMED_HGLOBAL)) return DV_E_TYMED;
+            HGLOBAL hMem = CreateDropFilesHandle(m_fullPaths);
+            if (!hMem) return STG_E_MEDIUMFULL;
+            pMedium->tymed = TYMED_HGLOBAL;
+            pMedium->hGlobal = hMem;
+            return S_OK;
+        }
+
+        return DV_E_FORMATETC;
+    }
+
+    HRESULT __stdcall GetDataHere(FORMATETC* /*pFormatEtc*/, STGMEDIUM* /*pMedium*/) override {
+        return DV_E_FORMATETC;
+    }
+
+    HRESULT __stdcall QueryGetData(FORMATETC* pFormatEtc) override {
+        if (!pFormatEtc) return E_POINTER;
+        if (!IsFormatSupported(pFormatEtc)) return DV_E_FORMATETC;
+        return S_OK;
+    }
+
+    HRESULT __stdcall GetCanonicalFormatEtc(FORMATETC* pFormatEtc, FORMATETC* pFormatEtcOut) override {
+        if (!pFormatEtcOut) return E_POINTER;
+        *pFormatEtcOut = *pFormatEtc;
+        return DATA_S_SAMEFORMATETC;
+    }
+
+    HRESULT __stdcall SetData(FORMATETC* /*pFormatEtc*/, STGMEDIUM* /*pMedium*/, BOOL /*fRelease*/) override {
+        return E_NOTIMPL;
+    }
+
+    HRESULT __stdcall EnumFormatEtc(DWORD dwDirection, IEnumFORMATETC** ppEnumFormatEtc) override {
+        if (!ppEnumFormatEtc) return E_POINTER;
+        if (dwDirection != DATADIR_GET) return E_NOTIMPL;
+        return SHCreateStdEnumFmtEtc(static_cast<ULONG>(m_formats.size()), m_formats.data(), ppEnumFormatEtc);
+    }
+
+    HRESULT __stdcall DAdvise(FORMATETC* /*pFormatEtc*/, DWORD /*advf*/, IAdviseSink* /*pAdvSink*/, DWORD* /*pdwConnection*/) override {
+        return OLE_E_ADVISENOTSUPPORTED;
+    }
+
+    HRESULT __stdcall DUnadvise(DWORD /*dwConnection*/) override {
+        return OLE_E_ADVISENOTSUPPORTED;
+    }
+
+    HRESULT __stdcall EnumDAdvise(IEnumSTATDATA** /*ppEnumAdvise*/) override {
+        return OLE_E_ADVISENOTSUPPORTED;
+    }
+};
 
 class PlatformInputWin : public IPlatformInput {
     private:
@@ -250,6 +529,79 @@ class PlatformInputWin : public IPlatformInput {
         if (!SetClipboardData(CF_HDROP, hMem)) { GlobalFree(hMem); CloseClipboard(); return false; }
         CloseClipboard();
         return true;
+    }
+
+    // Clipboard: Set remote files (CFSTR_FILEDESCRIPTORW / CFSTR_FILECONTENTS)
+    bool SetClipboardFilesRemote(const std::vector<std::string>& filePaths) override {
+        std::vector<std::wstring> fullPaths;
+        std::vector<std::wstring> fileNames;
+        std::vector<std::vector<uint8_t>> fileContents;
+
+        for (const auto& path : filePaths) {
+            std::wstring widePath = Utf8ToWide(path);
+            if (widePath.empty()) return false;
+            std::vector<uint8_t> buffer;
+            if (!ReadFileToBytes(widePath, buffer)) return false;
+            fullPaths.push_back(std::move(widePath));
+            fileNames.push_back(GetFileName(fullPaths.back()));
+            fileContents.push_back(std::move(buffer));
+        }
+
+        HRESULT hr = OleInitialize(nullptr);
+        if (FAILED(hr)) return false;
+
+        RemoteFileDataObject* dataObject = new RemoteFileDataObject(std::move(fullPaths), std::move(fileNames), std::move(fileContents));
+        if (!dataObject) {
+            OleUninitialize();
+            return false;
+        }
+
+        HRESULT setHr = OleSetClipboard(dataObject);
+        if (SUCCEEDED(setHr)) {
+            setHr = OleFlushClipboard();
+        }
+        dataObject->Release();
+        OleUninitialize();
+        return SUCCEEDED(setHr);
+    }
+
+    // Clipboard: Get remote file names from a redirected clipboard object
+    std::optional<std::vector<std::string>> GetClipboardFilesRemote() override {
+        HRESULT hr = OleInitialize(nullptr);
+        if (FAILED(hr)) return std::nullopt;
+
+        IDataObject* dataObject = nullptr;
+        hr = OleGetClipboard(&dataObject);
+        if (FAILED(hr) || !dataObject) {
+            OleUninitialize();
+            return std::nullopt;
+        }
+
+        UINT cfFileDescriptor = RegisterClipboardFormat(CFSTR_FILEDESCRIPTORW);
+        FORMATETC fmt = { static_cast<CLIPFORMAT>(cfFileDescriptor), nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
+        STGMEDIUM medium = { 0 };
+        std::optional<std::vector<std::string>> result;
+
+        if (SUCCEEDED(dataObject->GetData(&fmt, &medium))) {
+            FILEGROUPDESCRIPTORW* groupDesc = reinterpret_cast<FILEGROUPDESCRIPTORW*>(GlobalLock(medium.hGlobal));
+            if (groupDesc) {
+                result.emplace();
+                for (UINT i = 0; i < groupDesc->cItems; ++i) {
+                    FILEDESCRIPTORW& fileDesc = groupDesc->fgd[i];
+                    std::wstring name(fileDesc.cFileName);
+                    int utf8len = WideCharToMultiByte(CP_UTF8, 0, name.c_str(), -1, nullptr, 0, nullptr, nullptr);
+                    std::string utf8Name(utf8len - 1, 0);
+                    WideCharToMultiByte(CP_UTF8, 0, name.c_str(), -1, utf8Name.data(), utf8len, nullptr, nullptr);
+                    result->push_back(std::move(utf8Name));
+                }
+                GlobalUnlock(medium.hGlobal);
+            }
+            ReleaseStgMedium(&medium);
+        }
+
+        dataObject->Release();
+        OleUninitialize();
+        return result;
     }
 
     // Clipboard: Get files (CF_HDROP)

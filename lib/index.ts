@@ -68,6 +68,28 @@ export interface IInputBridge {
      * ```
      */
     getClipboardFiles(): string[] | null;
+
+    /**
+     * Sets remote clipboard file descriptors and file contents in a format suitable
+     * for Remote Desktop / redirected clipboard file transfer.
+     * 
+     * @param filePaths - Array of absolute file paths to send remotely.
+     * @returns `true` if the remote clipboard object was created successfully.
+     * 
+     * @platform Windows: Supported. Linux: Not implemented.
+     */
+    setClipboardFilesRemote(filePaths: string[]): boolean;
+
+    /**
+     * Gets the list of remote clipboard file names from the current clipboard.
+     * This reads a remote-capable file descriptor object, if available.
+     * 
+     * @returns Array of file names, or `null` if unavailable.
+     * 
+     * @platform Windows: Supported. Linux: Not implemented.
+     */
+    getClipboardFilesRemote(): string[] | null;
+
     /**
      * Asynchronously initializes the native input bridge.
      * On Linux (Wayland), this requests a RemoteDesktop portal session and waits
@@ -379,6 +401,14 @@ export class InputBridge implements IInputBridge {
 
     getClipboardFiles(): string[] | null {
         return this.nativeBridge.getClipboardFiles();
+    }
+
+    setClipboardFilesRemote(filePaths: string[]): boolean {
+        return this.nativeBridge.setClipboardFilesRemote(filePaths);
+    }
+
+    getClipboardFilesRemote(): string[] | null {
+        return this.nativeBridge.getClipboardFilesRemote();
     }
 }
 

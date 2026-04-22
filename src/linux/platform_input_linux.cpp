@@ -18,6 +18,8 @@ class PlatformInputLinux : public IPlatformInput {
     std::optional<std::string> GetClipboardText() override { return std::nullopt; }
     bool SetClipboardFiles(const std::vector<std::string>&) override { return false; }
     std::optional<std::vector<std::string>> GetClipboardFiles() override { return std::nullopt; }
+    bool SetClipboardFilesRemote(const std::vector<std::string>&) override { return false; }
+    std::optional<std::vector<std::string>> GetClipboardFilesRemote() override { return std::nullopt; }
 
     private:
     GDBusConnection* connection = nullptr;

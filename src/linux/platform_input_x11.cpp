@@ -157,6 +157,8 @@ class X11PlatformInput : public IPlatformInput {
     std::optional<std::string> GetClipboardText() override { return std::nullopt; }
     bool SetClipboardFiles(const std::vector<std::string>&) override { return false; }
     std::optional<std::vector<std::string>> GetClipboardFiles() override { return std::nullopt; }
+    bool SetClipboardFilesRemote(const std::vector<std::string>&) override { return false; }
+    std::optional<std::vector<std::string>> GetClipboardFilesRemote() override { return std::nullopt; }
     private:
     Display* m_display = nullptr;
     std::vector<KeyCode> m_scratchCodes;

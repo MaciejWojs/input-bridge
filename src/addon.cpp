@@ -44,7 +44,9 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
             InstanceMethod("setClipboardText", &InputBridge::SetClipboardText),
             InstanceMethod("getClipboardText", &InputBridge::GetClipboardText),
             InstanceMethod("setClipboardFiles", &InputBridge::SetClipboardFiles),
-            InstanceMethod("getClipboardFiles", &InputBridge::GetClipboardFiles)
+            InstanceMethod("getClipboardFiles", &InputBridge::GetClipboardFiles),
+            InstanceMethod("setClipboardFilesRemote", &InputBridge::SetClipboardFilesRemote),
+            InstanceMethod("getClipboardFilesRemote", &InputBridge::GetClipboardFilesRemote)
             });
 
         auto* constructor = new Napi::FunctionReference();
@@ -92,6 +94,34 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
     // Clipboard: getClipboardFiles(): string[] | null
     Napi::Value GetClipboardFiles(const Napi::CallbackInfo& info) {
         auto result = m_queue.GetPlatform()->GetClipboardFiles();
+        if (!result) return info.Env().Null();
+        Napi::Array arr = Napi::Array::New(info.Env(), result->size());
+        for (size_t i = 0; i < result->size(); ++i) {
+            arr[i] = Napi::String::New(info.Env(), (*result)[i]);
+        }
+        return arr;
+    }
+
+    // Clipboard: setClipboardFilesRemote(paths: string[]): boolean
+    Napi::Value SetClipboardFilesRemote(const Napi::CallbackInfo& info) {
+        if (info.Length() < 1 || !info[0].IsArray()) {
+            Napi::TypeError::New(info.Env(), "Expected array of file paths").ThrowAsJavaScriptException();
+            return info.Env().Undefined();
+        }
+        Napi::Array arr = info[0].As<Napi::Array>();
+        std::vector<std::string> paths;
+        for (uint32_t i = 0; i < arr.Length(); ++i) {
+            Napi::Value v = arr[i];
+            if (!v.IsString()) continue;
+            paths.push_back(v.As<Napi::String>().Utf8Value());
+        }
+        bool ok = m_queue.GetPlatform()->SetClipboardFilesRemote(paths);
+        return Napi::Boolean::New(info.Env(), ok);
+    }
+
+    // Clipboard: getClipboardFilesRemote(): string[] | null
+    Napi::Value GetClipboardFilesRemote(const Napi::CallbackInfo& info) {
+        auto result = m_queue.GetPlatform()->GetClipboardFilesRemote();
         if (!result) return info.Env().Null();
         Napi::Array arr = Napi::Array::New(info.Env(), result->size());
         for (size_t i = 0; i < result->size(); ++i) {
