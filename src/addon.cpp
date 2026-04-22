@@ -4,6 +4,36 @@
 #include <memory>
 #include <string>
 #include "platform_input.hpp"
+#include <array>
+#include <cstdint>
+#include <iostream>
+
+// Compile-time FNV-1a 64-bit hash and hex formatter to produce a stable build token.
+constexpr uint64_t fnv1a64(const char* s, size_t n) {
+    uint64_t h = 14695981039346656037ULL;
+    for (size_t i = 0; i < n; ++i) {
+        h ^= static_cast<uint8_t>(s[i]);
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+template<size_t N>
+constexpr std::array<char, 17> hex16(uint64_t v) {
+    std::array<char, 17> out = {};
+    const char* hex = "0123456789abcdef";
+    for (int i = 0; i < 16; ++i) {
+        out[15 - i] = hex[v & 0xF];
+        v >>= 4;
+    }
+    out[16] = '\0';
+    return out;
+}
+
+// Token source combines compile-time strings so the token changes when source/time/file changes.
+#define REV_SOURCE __FILE__ " " __DATE__ " " __TIME__
+constexpr uint64_t revision_hash = fnv1a64(REV_SOURCE, sizeof(REV_SOURCE) - 1);
+constexpr auto revision_token = hex16<16>(revision_hash);
 
 #if defined(_WIN32)
 #include "win/platform_input_win.cpp"
@@ -209,7 +239,7 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
             char16_t c = str[i];
             uint32_t codepoint = c;
             if (c >= 0xD800 && c <= 0xDBFF && i + 1 < str.length()) { // high surrogate
-                char16_t low = str[i+1];
+                char16_t low = str[i + 1];
                 if (low >= 0xDC00 && low <= 0xDFFF) { // low surrogate
                     codepoint = 0x10000 + ((c - 0xD800) << 10) + (low - 0xDC00);
                     i += 2;
@@ -254,6 +284,8 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
 };
 
 Napi::Object InitAll(Napi::Env env, Napi::Object exports) {
+    // Print compile-time generated revision token on module load
+    std::cout << "[InputBridge] revision: " << revision_token.data() << std::endl;
     return InputBridge::Init(env, exports);
 }
 
