@@ -42,6 +42,23 @@ All input flows through this strict pipeline:
 
 ---
 
+## C++ Language Standard (MANDATORY)
+
+The entire native codebase is written in **C++20** (`-std=c++20`).
+
+- All `.cpp` and `.hpp` files in `src/` and its subdirectories must be valid C++20.
+- Prefer C++20 features that improve clarity, safety, or maintainability, as long as they do not violate the performance constraints:
+  - `std::span` instead of raw pointer + length pairs
+  - `std::format` / `std::print` (where logging is needed outside hot paths)
+  - `concepts` to constrain template interfaces if templates are used
+  - `constexpr` / `consteval` for compile-time computations
+  - structured bindings, designated initializers, etc.
+- Do NOT use features not yet widely supported by compilers targeting Windows (MSVC 2022) and Linux (GCC 12+, Clang 16+). Stick to features available in C++20 with the default toolchains listed.
+- Ensure the build configuration (`binding.gyp`) sets the required C++ standard flag. If it is missing, add it as part of the build work, not as a separate refactor.
+- Node-API headers (napi.h) must compile cleanly with C++20. Avoid constructs that conflict with N-API internals; prefer modern alternatives only where safe.
+
+---
+
 ## Key files
 
 - `lib/` — JavaScript API surface (DO NOT break)
@@ -112,6 +129,7 @@ If unknown → ask for evidence instead of guessing.
 - Do NOT modify event pipeline structure without justification.
 - Do NOT optimize prematurely.
 - If a refactor is necessary → explain why BEFORE applying it.
+- When introducing C++20 features, do so only within the scope of the current task; do not rewrite entire files just to "modernize".
 
 ---
 
@@ -136,6 +154,7 @@ This is a low-level input system.
 - Prefer clarity over abstraction in native code.
 - Write comments in English only.
 - Ensure exported package files expose public APIs with TypeScript doc comments (tsdoc).
+- All new native code must comply with C++20. Legacy C-style code may be gradually modernized only with explicit approval
 
 ## API documentation rules (TS-DOC REQUIRED)
 
