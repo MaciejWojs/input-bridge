@@ -232,6 +232,10 @@ class PlatformInputLinux : public IPlatformInput {
     std::thread loop_thread;
     std::atomic<bool> is_running{ false };
     guint response_signal_id = 0;
+    std::string create_request_path;
+    std::string clipboard_request_path;
+    std::string select_request_path;
+    std::string start_request_path;
 
     std::mutex session_mutex;
     std::condition_variable session_cv;
@@ -394,7 +398,16 @@ class PlatformInputLinux : public IPlatformInput {
 
         PlatformInputLinux* self = static_cast<PlatformInputLinux*>(user_data);
 
-        if (g_str_has_suffix(object_path, "createReq")) {
+        const bool is_create_resp = (!self->create_request_path.empty() && self->create_request_path == object_path)
+            || g_str_has_suffix(object_path, "createReq");
+        const bool is_clipboard_resp = (!self->clipboard_request_path.empty() && self->clipboard_request_path == object_path)
+            || g_str_has_suffix(object_path, "clipboardReq");
+        const bool is_select_resp = (!self->select_request_path.empty() && self->select_request_path == object_path)
+            || g_str_has_suffix(object_path, "selectReq");
+        const bool is_start_resp = (!self->start_request_path.empty() && self->start_request_path == object_path)
+            || g_str_has_suffix(object_path, "startReq");
+
+        if (is_create_resp) {
             if (response == 0) {
                 const gchar* session_path = nullptr;
                 g_variant_lookup(results, "session_handle", "s", &session_path);
@@ -407,7 +420,7 @@ class PlatformInputLinux : public IPlatformInput {
                 std::cerr << "Portal session creation denied. Response: " << response << std::endl;
                 self->session_cv.notify_all();
             }
-        } else if (g_str_has_suffix(object_path, "clipboardReq")) {
+        } else if (is_clipboard_resp) {
             if (response == 0) {
                 std::cout << "Clipboard access granted." << std::endl;
                 // Setup the signal for requested read data
@@ -426,8 +439,7 @@ class PlatformInputLinux : public IPlatformInput {
             } else {
                 std::cerr << "Clipboard access denied. Continuing without clipboard. Response: " << response << std::endl;
             }
-            SelectDevices(self);
-        } else if (g_str_has_suffix(object_path, "selectReq")) {
+        } else if (is_select_resp) {
             if (response == 0) {
                 std::cout << "SelectDevices completed successfully." << std::endl;
                 StartSession(self);
@@ -435,7 +447,7 @@ class PlatformInputLinux : public IPlatformInput {
                 std::cerr << "SelectDevices denied. Response: " << response << std::endl;
                 self->session_cv.notify_all();
             }
-        } else if (g_str_has_suffix(object_path, "startReq")) {
+        } else if (is_start_resp) {
             if (response == 0) {
                 std::cout << "RemoteDesktop session successfully STARTed! Ready for input injection." << std::endl;
                 {
@@ -447,6 +459,8 @@ class PlatformInputLinux : public IPlatformInput {
                 std::cerr << "RemoteDesktop session failed to START. Response: " << response << std::endl;
                 self->session_cv.notify_all();
             }
+        } else {
+            std::cout << "Ignoring portal response for unknown request object: " << object_path << std::endl;
         }
 
         if (results) {
@@ -483,6 +497,7 @@ class PlatformInputLinux : public IPlatformInput {
         } else {
             const gchar* request_path = nullptr;
             g_variant_get(start_result, "(&o)", &request_path);
+            self->start_request_path = request_path;
             std::cout << "Start requested successfully. Request path: " << request_path << std::endl;
             g_variant_unref(start_result);
         }
@@ -503,7 +518,7 @@ class PlatformInputLinux : public IPlatformInput {
             "org.freedesktop.portal.Clipboard",
             "RequestClipboard",
             g_variant_new("(oa{sv})", self->session_handle.c_str(), &builder),
-            G_VARIANT_TYPE("(o)"),
+            nullptr,
             G_DBUS_CALL_FLAGS_NONE,
             -1,
             nullptr,
@@ -515,9 +530,31 @@ class PlatformInputLinux : public IPlatformInput {
             g_error_free(error);
             SelectDevices(self); // Resume execution sequence anyway
         } else {
-            const gchar* request_path = nullptr;
-            g_variant_get(result, "(&o)", &request_path);
-            std::cout << "RequestClipboard returned request path: " << request_path << std::endl;
+            if (self->clipboard_signal_id == 0) {
+                self->clipboard_signal_id = g_dbus_connection_signal_subscribe(
+                    self->connection,
+                    "org.freedesktop.portal.Desktop",
+                    "org.freedesktop.portal.Clipboard",
+                    "SelectionTransfer",
+                    "/org/freedesktop/portal/desktop",
+                    nullptr,
+                    G_DBUS_SIGNAL_FLAGS_NONE,
+                    OnClipboardSelectionTransfer,
+                    self,
+                    nullptr
+                );
+            }
+            if (result && g_variant_n_children(result) == 1) {
+                const gchar* request_path = nullptr;
+                g_variant_get(result, "(&o)", &request_path);
+                if (request_path) {
+                    self->clipboard_request_path = request_path;
+                    std::cout << "RequestClipboard returned request path: " << request_path << std::endl;
+                }
+            } else {
+                std::cout << "RequestClipboard completed successfully." << std::endl;
+            }
+            SelectDevices(self);
             g_variant_unref(result);
         }
     }
@@ -554,6 +591,7 @@ class PlatformInputLinux : public IPlatformInput {
         } else {
             const gchar* request_path = nullptr;
             g_variant_get(result, "(&o)", &request_path);
+            self->select_request_path = request_path;
             std::cout << "SelectDevices returned request path: " << request_path << std::endl;
             g_variant_unref(result);
         }
@@ -620,6 +658,7 @@ class PlatformInputLinux : public IPlatformInput {
         } else {
             const gchar* request_path = nullptr;
             g_variant_get(result, "(&o)", &request_path);
+            create_request_path = request_path;
             std::cout << "CreateSession requested successfully. Request path: " << request_path << std::endl;
             g_variant_unref(result);
 
