@@ -1,3 +1,8 @@
+## <small>0.2.1 (2026-04-22)</small>
+
+* feat: add compile-time revision token generation and logging on module load ([850aac5](https://github.com/MaciejWojs/input-bridge/commit/850aac5))
+* feat: refactor PlatformInputLinux to use smart pointers and improve DBus handling ([7b8b964](https://github.com/MaciejWojs/input-bridge/commit/7b8b964))
+
 ## 0.2.0 (2026-04-18)
 
 * feat: add playground directory and .txt files to .gitignore ([197107f](https://github.com/MaciejWojs/input-bridge/commit/197107f))

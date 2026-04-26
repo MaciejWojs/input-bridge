@@ -361,7 +361,16 @@ class PlatformInputLinux : public IPlatformInput {
         int fd = g_unix_fd_list_get(out_fd_list, handle_index, nullptr);
         
         if (fd >= 0) {
-            write(fd, data_to_send.data(), data_to_send.size());
+            const char* data_ptr = data_to_send.data();
+            size_t remaining = data_to_send.size();
+            while (remaining > 0) {
+                ssize_t written = write(fd, data_ptr, remaining);
+                if (written <= 0) {
+                    break;
+                }
+                data_ptr += written;
+                remaining -= static_cast<size_t>(written);
+            }
             close(fd);
         }
         
@@ -877,6 +886,10 @@ class PlatformInputLinux : public IPlatformInput {
 
         uint32_t codepoint = static_cast<uint32_t>(charCode);
 
+        auto sleep_ms = [](int ms) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+        };
+
         auto send_key = [&](uint32_t evdev, bool down) {
             GVariantBuilder options_builder;
             g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
@@ -894,7 +907,7 @@ class PlatformInputLinux : public IPlatformInput {
                 nullptr
             );
             if (result) g_variant_unref(result);
-            std::this_thread::sleep_for(std::chrono::milliseconds(4));
+            sleep_ms(6);
             };
 
         auto tap_key = [&](uint32_t evdev) {
@@ -916,6 +929,8 @@ class PlatformInputLinux : public IPlatformInput {
                 g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder1, (int32_t)codepoint, 1),
                 nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr);
 
+            sleep_ms(6);
+
             GVariantBuilder options_builder2;
             g_variant_builder_init(&options_builder2, G_VARIANT_TYPE_VARDICT);
             g_dbus_connection_call_sync(connection, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
@@ -923,7 +938,7 @@ class PlatformInputLinux : public IPlatformInput {
                 g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder2, (int32_t)codepoint, 0),
                 nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr);
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            sleep_ms(12);
             return;
         }
 
@@ -933,9 +948,12 @@ class PlatformInputLinux : public IPlatformInput {
 
         send_key(29, true); // Left Ctrl
         send_key(42, true); // Left Shift
+        sleep_ms(14);
         tap_key(22);        // U (evdev 22)
+        sleep_ms(16);
         send_key(42, false);
         send_key(29, false);
+        sleep_ms(20);
 
         for (int i = 0; hex[i] != '\0'; i++) {
             uint32_t evdev = 0;
@@ -957,11 +975,14 @@ class PlatformInputLinux : public IPlatformInput {
             else if (c == 'e') evdev = 18;
             else if (c == 'f') evdev = 33;
 
-            if (evdev > 0) tap_key(evdev);
+            if (evdev > 0) {
+                tap_key(evdev);
+                sleep_ms(9);
+            }
         }
 
         tap_key(57); // Space to finish
-        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        sleep_ms(35);
     }
 
     void ExecuteEvents(const std::vector<InputEvent>& events) override {
