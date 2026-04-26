@@ -240,7 +240,14 @@ class X11PlatformInput : public IPlatformInput {
 
     KeyCode GetScratchForSym(KeySym sym) {
         InitScratch();
-        if (m_scratchCodes.empty()) return 0;
+        
+        // Fallback if no empty keys are found: use max_keycode
+        if (m_scratchCodes.empty()) {
+            int min_keycode = 0, max_keycode = 0;
+            XDisplayKeycodes(m_display, &min_keycode, &max_keycode);
+            m_scratchCodes.push_back(max_keycode);
+            m_scratchSyms.push_back(NoSymbol);
+        }
 
         // Re-use an existing scratch key if already mapped
         for (size_t i = 0; i < m_scratchCodes.size(); ++i) {
@@ -445,17 +452,25 @@ class X11PlatformInput : public IPlatformInput {
             if (shiftCode) {
                 XTestFakeKeyEvent(m_display, shiftCode, True, CurrentTime);
                 XSync(m_display, False);
+                usleep(1000 * 14);
             }
         }
 
         XTestFakeKeyEvent(m_display, keyCode, True, CurrentTime);
+        XSync(m_display, False);
+        usleep(1000 * 16);
+        
         XTestFakeKeyEvent(m_display, keyCode, False, CurrentTime);
         XSync(m_display, False);
+        usleep(1000 * 20);
 
         if (shiftCode) {
             XTestFakeKeyEvent(m_display, shiftCode, False, CurrentTime);
             XSync(m_display, False);
+            usleep(1000 * 10);
         }
+        
+        usleep(1000 * 35);
     }
 
     void ExecuteEvents(const std::vector<InputEvent>& events) override {
