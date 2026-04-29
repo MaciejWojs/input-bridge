@@ -8,11 +8,14 @@
 #include <gio/gunixfdlist.h>
 #include <unistd.h>
 #include <thread>
+#include <future>
 #include <atomic>
 #include <mutex>
 #include <condition_variable>
 #include <chrono>
 #include <map>
+#include <deque>
+#include <functional>
 #include <dlfcn.h>
 
 class PlatformInputLinux : public IPlatformInput {
@@ -24,6 +27,7 @@ class PlatformInputLinux : public IPlatformInput {
     bool SetClipboardText(const std::string& text) override {
         if (!is_session_ready) return false;
 
+        const std::string session_handle = GetSessionHandle();
         {
             std::lock_guard<std::mutex> lock(clipboard_mutex);
             m_clipboardData["text/plain;charset=utf-8"] = text;
@@ -31,11 +35,11 @@ class PlatformInputLinux : public IPlatformInput {
 
         GVariantBuilder options;
         g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);
-        
+
         GVariantBuilder mime_builder;
         g_variant_builder_init(&mime_builder, G_VARIANT_TYPE_STRING_ARRAY);
         g_variant_builder_add(&mime_builder, "s", "text/plain;charset=utf-8");
-        
+
         g_variant_builder_add(&options, "{sv}", "mime_types", g_variant_builder_end(&mime_builder));
 
         GError* error = nullptr;
@@ -45,7 +49,7 @@ class PlatformInputLinux : public IPlatformInput {
             "/org/freedesktop/portal/desktop",
             "org.freedesktop.portal.Clipboard",
             "SetSelection",
-            g_variant_new("(oa{sv})", session_handle.c_str(), &options),
+            g_variant_new("(o@a{sv})", session_handle.c_str(), g_variant_builder_end(&options)),
             nullptr,
             G_DBUS_CALL_FLAGS_NONE,
             -1,
@@ -65,9 +69,10 @@ class PlatformInputLinux : public IPlatformInput {
     std::optional<std::string> GetClipboardText() override {
         if (!is_session_ready) return std::nullopt;
 
+        const std::string session_handle = GetSessionHandle();
         GError* error = nullptr;
-        GUnixFDList *out_fd_list = nullptr;
-        GVariant *result = g_dbus_connection_call_with_unix_fd_list_sync(
+        GUnixFDList* out_fd_list = nullptr;
+        GVariant* result = g_dbus_connection_call_with_unix_fd_list_sync(
             connection,
             "org.freedesktop.portal.Desktop",
             "/org/freedesktop/portal/desktop",
@@ -102,7 +107,7 @@ class PlatformInputLinux : public IPlatformInput {
             }
             close(fd);
         }
-        
+
         if (out_fd_list) g_object_unref(out_fd_list);
         if (result) g_variant_unref(result);
 
@@ -112,6 +117,7 @@ class PlatformInputLinux : public IPlatformInput {
     bool SetClipboardFiles(const std::vector<std::string>& files) override {
         if (!is_session_ready) return false;
 
+        const std::string session_handle = GetSessionHandle();
         std::string payload;
         for (const auto& file : files) {
             payload += "file://" + file + "\r\n";
@@ -124,11 +130,11 @@ class PlatformInputLinux : public IPlatformInput {
 
         GVariantBuilder options;
         g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);
-        
+
         GVariantBuilder mime_builder;
         g_variant_builder_init(&mime_builder, G_VARIANT_TYPE_STRING_ARRAY);
         g_variant_builder_add(&mime_builder, "s", "text/uri-list");
-        
+
         g_variant_builder_add(&options, "{sv}", "mime_types", g_variant_builder_end(&mime_builder));
 
         GError* error = nullptr;
@@ -138,7 +144,7 @@ class PlatformInputLinux : public IPlatformInput {
             "/org/freedesktop/portal/desktop",
             "org.freedesktop.portal.Clipboard",
             "SetSelection",
-            g_variant_new("(oa{sv})", session_handle.c_str(), &options),
+            g_variant_new("(o@a{sv})", session_handle.c_str(), g_variant_builder_end(&options)),
             nullptr,
             G_DBUS_CALL_FLAGS_NONE,
             -1,
@@ -158,9 +164,10 @@ class PlatformInputLinux : public IPlatformInput {
     std::optional<std::vector<std::string>> GetClipboardFiles() override {
         if (!is_session_ready) return std::nullopt;
 
+        const std::string session_handle = GetSessionHandle();
         GError* error = nullptr;
-        GUnixFDList *out_fd_list = nullptr;
-        GVariant *result = g_dbus_connection_call_with_unix_fd_list_sync(
+        GUnixFDList* out_fd_list = nullptr;
+        GVariant* result = g_dbus_connection_call_with_unix_fd_list_sync(
             connection,
             "org.freedesktop.portal.Desktop",
             "/org/freedesktop/portal/desktop",
@@ -194,7 +201,7 @@ class PlatformInputLinux : public IPlatformInput {
             }
             close(fd);
         }
-        
+
         if (out_fd_list) g_object_unref(out_fd_list);
         if (result) g_variant_unref(result);
 
@@ -225,34 +232,48 @@ class PlatformInputLinux : public IPlatformInput {
     private:
     GDBusConnection* connection = nullptr;
     std::string session_handle;
-    bool is_session_ready = false;
+    std::atomic<bool> is_session_ready = false;
     bool m_batchMode = false;
 
+    GMainContext* dbus_context = nullptr;
     GMainLoop* main_loop = nullptr;
     std::thread loop_thread;
     std::atomic<bool> is_running{ false };
     guint response_signal_id = 0;
-    std::string create_request_path;
-    std::string clipboard_request_path;
-    std::string select_request_path;
-    std::string start_request_path;
 
     std::mutex session_mutex;
     std::condition_variable session_cv;
+    std::mutex request_queue_mutex;
+    std::condition_variable request_queue_cv;
+    std::deque<std::function<void()>> request_queue;
+    std::jthread request_thread;
+
+    void EnqueuePortalTask(std::function<void()> task) {
+        {
+            std::lock_guard<std::mutex> lock(request_queue_mutex);
+            request_queue.emplace_back(std::move(task));
+        }
+        request_queue_cv.notify_one();
+    }
+
+    std::string GetSessionHandle() {
+        std::lock_guard<std::mutex> lock(session_mutex);
+        return session_handle;
+    }
 
     static bool SendKeyboardKeycode(GDBusConnection* connection, const std::string& handle, uint32_t evdev, bool down) {
         GVariantBuilder options_builder;
         g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
 
-        uint32_t state = down ? 1 : 0;
         GError* error = nullptr;
+        uint32_t state = down ? 1 : 0;
         GVariant* result = g_dbus_connection_call_sync(
             connection,
             "org.freedesktop.portal.Desktop",
             "/org/freedesktop/portal/desktop",
             "org.freedesktop.portal.RemoteDesktop",
             "NotifyKeyboardKeycode",
-            g_variant_new("(oa{sv}iu)", handle.c_str(), &options_builder, evdev, state),
+            g_variant_new("(o@a{sv}iu)", handle.c_str(), g_variant_builder_end(&options_builder), (int32_t)evdev, state),
             nullptr,
             G_DBUS_CALL_FLAGS_NONE,
             -1,
@@ -299,15 +320,16 @@ class PlatformInputLinux : public IPlatformInput {
     static void OnClipboardSelectionTransfer(GDBusConnection* connection, const gchar* sender_name,
         const gchar* object_path, const gchar* interface_name,
         const gchar* signal_name, GVariant* parameters, gpointer user_data) {
-        
+
         PlatformInputLinux* self = static_cast<PlatformInputLinux*>(user_data);
+        const std::string current_session_handle = self->GetSessionHandle();
         const gchar* session_handle = nullptr;
         const gchar* mime_type = nullptr;
         guint32 serial = 0;
 
         g_variant_get(parameters, "(&o&su)", &session_handle, &mime_type, &serial);
 
-        if (self->session_handle != session_handle) return;
+        if (current_session_handle != session_handle) return;
 
         std::string mime(mime_type);
         std::string data_to_send;
@@ -319,102 +341,140 @@ class PlatformInputLinux : public IPlatformInput {
             }
         }
 
-        if (data_to_send.empty()) {
-            g_dbus_connection_call_sync(
-                self->connection, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
-                "org.freedesktop.portal.Clipboard", "SelectionWriteDone",
-                g_variant_new("(oub)", self->session_handle.c_str(), serial, FALSE),
-                nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr
-            );
-            return;
-        }
-
-        // Call SelectionWrite
-        GError* error = nullptr;
-        GUnixFDList *out_fd_list = nullptr;
-        GVariant *result = g_dbus_connection_call_with_unix_fd_list_sync(
-            self->connection,
-            "org.freedesktop.portal.Desktop",
-            "/org/freedesktop/portal/desktop",
-            "org.freedesktop.portal.Clipboard",
-            "SelectionWrite",
-            g_variant_new("(ou)", self->session_handle.c_str(), serial),
-            G_VARIANT_TYPE("(h)"),
-            G_DBUS_CALL_FLAGS_NONE,
-            -1,
-            nullptr,
-            &out_fd_list,
-            nullptr,
-            &error
-        );
-
-        if (error) {
-            std::cerr << "Failed to call SelectionWrite: " << error->message << std::endl;
-            g_error_free(error);
-            g_dbus_connection_call_sync(
-                self->connection, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
-                "org.freedesktop.portal.Clipboard", "SelectionWriteDone",
-                g_variant_new("(oub)", self->session_handle.c_str(), serial, FALSE),
-                nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr
-            );
-            return;
-        }
-
-        gint handle_index;
-        g_variant_get(result, "(h)", &handle_index);
-        int fd = g_unix_fd_list_get(out_fd_list, handle_index, nullptr);
-        
-        if (fd >= 0) {
-            const char* data_ptr = data_to_send.data();
-            size_t remaining = data_to_send.size();
-            while (remaining > 0) {
-                ssize_t written = write(fd, data_ptr, remaining);
-                if (written <= 0) {
-                    break;
-                }
-                data_ptr += written;
-                remaining -= static_cast<size_t>(written);
+        self->EnqueuePortalTask([self, current_session_handle, serial, mime = std::move(mime), data_to_send = std::move(data_to_send)]() mutable {
+            if (data_to_send.empty()) {
+                g_dbus_connection_call_sync(
+                    self->connection, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+                    "org.freedesktop.portal.Clipboard", "SelectionWriteDone",
+                    g_variant_new("(oub)", current_session_handle.c_str(), serial, FALSE),
+                    nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr
+                );
+                return;
             }
-            close(fd);
-        }
-        
-        if (out_fd_list) g_object_unref(out_fd_list);
-        if (result) g_variant_unref(result);
 
-        g_dbus_connection_call_sync(
-            self->connection, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
-            "org.freedesktop.portal.Clipboard", "SelectionWriteDone",
-            g_variant_new("(oub)", self->session_handle.c_str(), serial, TRUE),
-            nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr
-        );
+            GError* error = nullptr;
+            GUnixFDList* out_fd_list = nullptr;
+            GVariant* result = g_dbus_connection_call_with_unix_fd_list_sync(
+                self->connection,
+                "org.freedesktop.portal.Desktop",
+                "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.Clipboard",
+                "SelectionWrite",
+                g_variant_new("(ou)", current_session_handle.c_str(), serial),
+                G_VARIANT_TYPE("(h)"),
+                G_DBUS_CALL_FLAGS_NONE,
+                -1,
+                nullptr,
+                &out_fd_list,
+                nullptr,
+                &error
+            );
+
+            if (error) {
+                std::cerr << "Failed to call SelectionWrite: " << error->message << std::endl;
+                g_error_free(error);
+                g_dbus_connection_call_sync(
+                    self->connection, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+                    "org.freedesktop.portal.Clipboard", "SelectionWriteDone",
+                    g_variant_new("(oub)", current_session_handle.c_str(), serial, FALSE),
+                    nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr
+                );
+                return;
+            }
+
+            gint handle_index;
+            g_variant_get(result, "(h)", &handle_index);
+            int fd = g_unix_fd_list_get(out_fd_list, handle_index, nullptr);
+
+            if (fd >= 0) {
+                const char* data_ptr = data_to_send.data();
+                size_t remaining = data_to_send.size();
+                while (remaining > 0) {
+                    ssize_t written = write(fd, data_ptr, remaining);
+                    if (written <= 0) {
+                        break;
+                    }
+                    data_ptr += written;
+                    remaining -= static_cast<size_t>(written);
+                }
+                close(fd);
+            }
+
+            if (out_fd_list) g_object_unref(out_fd_list);
+            if (result) g_variant_unref(result);
+
+            g_dbus_connection_call_sync(
+                self->connection, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.Clipboard", "SelectionWriteDone",
+                g_variant_new("(oub)", current_session_handle.c_str(), serial, TRUE),
+                nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr
+            );
+            });
     }
 
     static void OnPortalResponse(GDBusConnection* connection, const gchar* sender_name,
         const gchar* object_path, const gchar* interface_name,
         const gchar* signal_name, GVariant* parameters, gpointer user_data) {
-        guint32 response;
-        GVariant* results = nullptr;
-        g_variant_get(parameters, "(u@a{sv})", &response, &results);
+        if (!parameters || !object_path) {
+            if (!object_path) {
+                std::cerr << "OnPortalResponse received null object_path" << std::endl;
+            }
+            return;
+        }
 
         PlatformInputLinux* self = static_cast<PlatformInputLinux*>(user_data);
+        guint32 response = 0;
+        GVariant* results = nullptr;
 
-        const bool is_create_resp = (!self->create_request_path.empty() && self->create_request_path == object_path)
-            || g_str_has_suffix(object_path, "createReq");
-        const bool is_clipboard_resp = (!self->clipboard_request_path.empty() && self->clipboard_request_path == object_path)
-            || g_str_has_suffix(object_path, "clipboardReq");
-        const bool is_select_resp = (!self->select_request_path.empty() && self->select_request_path == object_path)
-            || g_str_has_suffix(object_path, "selectReq");
-        const bool is_start_resp = (!self->start_request_path.empty() && self->start_request_path == object_path)
-            || g_str_has_suffix(object_path, "startReq");
+        g_variant_get(parameters, "(u@a{sv})", &response, &results);
+
+        const bool is_create_resp = g_str_has_suffix(object_path, "createReq");
+        const bool is_clipboard_resp = g_str_has_suffix(object_path, "clipboardReq");
+        const bool is_select_resp = g_str_has_suffix(object_path, "selectReq");
+        const bool is_start_resp = g_str_has_suffix(object_path, "startReq");
+
+        std::cout << "Portal Response signal from: " << object_path
+            << " response=" << response << std::endl;
 
         if (is_create_resp) {
             if (response == 0) {
-                const gchar* session_path = nullptr;
-                g_variant_lookup(results, "session_handle", "s", &session_path);
-                if (session_path) {
-                    std::cout << "Portal session created! Session path: " << session_path << std::endl;
-                    self->session_handle = session_path;
-                    RequestClipboard(self);
+                if (!results) {
+                    std::cerr << "Portal session creation response missing results dictionary." << std::endl;
+                    self->session_cv.notify_all();
+                } else {
+                    GVariant* handle_v = g_variant_lookup_value(results, "session_handle", G_VARIANT_TYPE_STRING);
+                    if (handle_v) {
+                        const gchar* session_path = g_variant_get_string(handle_v, nullptr);
+                        if (session_path) {
+                            std::string session_handle_str = session_path;
+                            if (!session_handle_str.empty() && session_handle_str[0] != '/') {
+                                const char* sender = g_dbus_connection_get_unique_name(self->connection);
+                                if (sender) {
+                                    std::string sender_str = sender;
+                                    if (!sender_str.empty() && sender_str[0] == ':') {
+                                        sender_str.erase(0, 1);
+                                    }
+                                    for (char& c : sender_str) {
+                                        if (c == '.') c = '_';
+                                    }
+                                    session_handle_str = "/org/freedesktop/portal/desktop/session/" + sender_str + "/" + session_handle_str;
+                                }
+                            }
+                            std::cout << "Portal session created! Session path: " << session_handle_str << std::endl;
+                            {
+                                std::lock_guard<std::mutex> lock(self->session_mutex);
+                                self->session_handle = session_handle_str;
+                            }
+                            self->EnqueuePortalTask([self]() { SelectDevices(self); });
+                        } else {
+                            std::cerr << "Portal response session_handle string was null." << std::endl;
+                            self->session_cv.notify_all();
+                        }
+                        g_variant_unref(handle_v);
+                    } else {
+                        std::cerr << "Portal response missing session_handle despite success." << std::endl;
+                        self->session_cv.notify_all();
+                    }
                 }
             } else {
                 std::cerr << "Portal session creation denied. Response: " << response << std::endl;
@@ -423,7 +483,6 @@ class PlatformInputLinux : public IPlatformInput {
         } else if (is_clipboard_resp) {
             if (response == 0) {
                 std::cout << "Clipboard access granted." << std::endl;
-                // Setup the signal for requested read data
                 self->clipboard_signal_id = g_dbus_connection_signal_subscribe(
                     self->connection,
                     "org.freedesktop.portal.Desktop",
@@ -442,7 +501,7 @@ class PlatformInputLinux : public IPlatformInput {
         } else if (is_select_resp) {
             if (response == 0) {
                 std::cout << "SelectDevices completed successfully." << std::endl;
-                StartSession(self);
+                self->EnqueuePortalTask([self]() { StartSession(self); });
             } else {
                 std::cerr << "SelectDevices denied. Response: " << response << std::endl;
                 self->session_cv.notify_all();
@@ -450,10 +509,8 @@ class PlatformInputLinux : public IPlatformInput {
         } else if (is_start_resp) {
             if (response == 0) {
                 std::cout << "RemoteDesktop session successfully STARTed! Ready for input injection." << std::endl;
-                {
-                    std::lock_guard<std::mutex> lock(self->session_mutex);
-                    self->is_session_ready = true;
-                }
+                self->is_session_ready.store(true);
+                self->EnqueuePortalTask([self]() { RequestClipboard(self); });
                 self->session_cv.notify_all();
             } else {
                 std::cerr << "RemoteDesktop session failed to START. Response: " << response << std::endl;
@@ -471,7 +528,8 @@ class PlatformInputLinux : public IPlatformInput {
     static void StartSession(PlatformInputLinux* self) {
         GError* error = nullptr;
 
-        std::cout << "Calling RemoteDesktop.Start on session " << self->session_handle << "..." << std::endl;
+        const std::string session_handle = self->GetSessionHandle();
+        std::cout << "Calling RemoteDesktop.Start on session " << session_handle << "..." << std::endl;
 
         GVariantBuilder options_builder;
         g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
@@ -483,7 +541,7 @@ class PlatformInputLinux : public IPlatformInput {
             "/org/freedesktop/portal/desktop",
             "org.freedesktop.portal.RemoteDesktop",
             "Start",
-            g_variant_new("(osa{sv})", self->session_handle.c_str(), "", &options_builder),
+            g_variant_new("(os@a{sv})", session_handle.c_str(), "", g_variant_builder_end(&options_builder)),
             G_VARIANT_TYPE("(o)"),
             G_DBUS_CALL_FLAGS_NONE,
             -1,
@@ -494,10 +552,14 @@ class PlatformInputLinux : public IPlatformInput {
         if (error) {
             std::cerr << "Failed to Start session: " << error->message << std::endl;
             g_error_free(error);
+            {
+                std::lock_guard<std::mutex> lock(self->session_mutex);
+                self->is_session_ready = false;
+            }
+            self->session_cv.notify_all();
         } else {
             const gchar* request_path = nullptr;
             g_variant_get(start_result, "(&o)", &request_path);
-            self->start_request_path = request_path;
             std::cout << "Start requested successfully. Request path: " << request_path << std::endl;
             g_variant_unref(start_result);
         }
@@ -505,7 +567,8 @@ class PlatformInputLinux : public IPlatformInput {
 
     static void RequestClipboard(PlatformInputLinux* self) {
         GError* error = nullptr;
-        std::cout << "Calling RequestClipboard on session " << self->session_handle << "..." << std::endl;
+        const std::string session_handle = self->GetSessionHandle();
+        std::cout << "Calling RequestClipboard on session " << session_handle << "..." << std::endl;
 
         GVariantBuilder builder;
         g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
@@ -517,7 +580,7 @@ class PlatformInputLinux : public IPlatformInput {
             "/org/freedesktop/portal/desktop",
             "org.freedesktop.portal.Clipboard",
             "RequestClipboard",
-            g_variant_new("(oa{sv})", self->session_handle.c_str(), &builder),
+            g_variant_new("(o@a{sv})", session_handle.c_str(), g_variant_builder_end(&builder)),
             nullptr,
             G_DBUS_CALL_FLAGS_NONE,
             -1,
@@ -528,7 +591,6 @@ class PlatformInputLinux : public IPlatformInput {
         if (error) {
             std::cerr << "Failed to RequestClipboard: " << error->message << std::endl;
             g_error_free(error);
-            SelectDevices(self); // Resume execution sequence anyway
         } else {
             if (self->clipboard_signal_id == 0) {
                 self->clipboard_signal_id = g_dbus_connection_signal_subscribe(
@@ -544,24 +606,30 @@ class PlatformInputLinux : public IPlatformInput {
                     nullptr
                 );
             }
-            if (result && g_variant_n_children(result) == 1) {
+            if (result && g_variant_is_of_type(result, G_VARIANT_TYPE("(o)")) && g_variant_n_children(result) == 1) {
                 const gchar* request_path = nullptr;
                 g_variant_get(result, "(&o)", &request_path);
-                if (request_path) {
-                    self->clipboard_request_path = request_path;
-                    std::cout << "RequestClipboard returned request path: " << request_path << std::endl;
-                }
+                std::cout << "RequestClipboard returned request path: " << (request_path ? request_path : "null") << std::endl;
             } else {
                 std::cout << "RequestClipboard completed successfully." << std::endl;
             }
-            SelectDevices(self);
+        }
+
+        if (result) {
             g_variant_unref(result);
         }
     }
 
     static void SelectDevices(PlatformInputLinux* self) {
         GError* error = nullptr;
-        std::cout << "Calling RemoteDesktop.SelectDevices on session " << self->session_handle << "..." << std::endl;
+        const std::string session_handle = self->GetSessionHandle();
+        std::cout << "Calling RemoteDesktop.SelectDevices on session " << session_handle << "..." << std::endl;
+
+        if (!g_variant_is_object_path(session_handle.c_str())) {
+            std::cerr << "CRITICAL: Invalid session path: " << session_handle << std::endl;
+            self->session_cv.notify_all();
+            return;
+        }
 
         GVariantBuilder builder;
         g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
@@ -577,8 +645,8 @@ class PlatformInputLinux : public IPlatformInput {
             "/org/freedesktop/portal/desktop",
             "org.freedesktop.portal.RemoteDesktop",
             "SelectDevices",
-            g_variant_new("(oa{sv})", self->session_handle.c_str(), &builder),
-            G_VARIANT_TYPE("(o)"),
+            g_variant_new("(o@a{sv})", session_handle.c_str(), g_variant_builder_end(&builder)),
+            nullptr,
             G_DBUS_CALL_FLAGS_NONE,
             -1,
             nullptr,
@@ -588,11 +656,15 @@ class PlatformInputLinux : public IPlatformInput {
         if (error) {
             std::cerr << "Failed to SelectDevices: " << error->message << std::endl;
             g_error_free(error);
-        } else {
-            const gchar* request_path = nullptr;
-            g_variant_get(result, "(&o)", &request_path);
-            self->select_request_path = request_path;
-            std::cout << "SelectDevices returned request path: " << request_path << std::endl;
+            self->session_cv.notify_all();
+        } else if (result) {
+            if (g_variant_is_of_type(result, G_VARIANT_TYPE("(o)")) && g_variant_n_children(result) == 1) {
+                const gchar* request_path = nullptr;
+                g_variant_get(result, "(&o)", &request_path);
+                std::cout << "SelectDevices returned request path: " << (request_path ? request_path : "null") << std::endl;
+            } else {
+                std::cout << "SelectDevices returned unexpected result type." << std::endl;
+            }
             g_variant_unref(result);
         }
     }
@@ -607,26 +679,72 @@ class PlatformInputLinux : public IPlatformInput {
         }
         std::cout << "Successfully connected to D-Bus session bus." << std::endl;
 
-        // Run the GMainLoop in a separate thread to receive asynchronous D-Bus signals
-        main_loop = g_main_loop_new(nullptr, FALSE);
-        is_running = true;
-        loop_thread = std::thread([this]() {
+        std::promise<bool> dbus_ready;
+        auto dbus_future = dbus_ready.get_future();
+
+        dbus_context = g_main_context_new();
+        loop_thread = std::thread([this, &dbus_ready]() {
+            g_main_context_push_thread_default(this->dbus_context);
+
+            GError* error = nullptr;
+            this->connection = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &error);
+            if (!this->connection) {
+                std::cerr << "Failed to connect to D-Bus session bus: "
+                    << (error ? error->message : "unknown") << std::endl;
+                if (error) {
+                    g_error_free(error);
+                }
+                dbus_ready.set_value(false);
+                g_main_context_pop_thread_default(this->dbus_context);
+                return;
+            }
+
+            std::cout << "Successfully connected to D-Bus session bus." << std::endl;
+
+            this->response_signal_id = g_dbus_connection_signal_subscribe(
+                this->connection,
+                "org.freedesktop.portal.Desktop",
+                "org.freedesktop.portal.Request",
+                "Response",
+                nullptr,
+                nullptr,
+                G_DBUS_SIGNAL_FLAGS_NONE,
+                OnPortalResponse,
+                this,
+                nullptr
+            );
+
+            this->main_loop = g_main_loop_new(this->dbus_context, FALSE);
+            dbus_ready.set_value(true);
             g_main_loop_run(this->main_loop);
+            g_main_context_pop_thread_default(this->dbus_context);
             });
 
-        // Subscribe to the Response signal IMMEDIATELY so we don't miss the portal reply
-        response_signal_id = g_dbus_connection_signal_subscribe(
-            connection,
-            "org.freedesktop.portal.Desktop",
-            "org.freedesktop.portal.Request",
-            "Response",
-            nullptr, // object path will be known after CreateSession, but we capture it globally
-            nullptr,
-            G_DBUS_SIGNAL_FLAGS_NONE,
-            OnPortalResponse,
-            this,
-            nullptr
-        );
+        if (!dbus_future.get()) {
+            if (loop_thread.joinable()) {
+                loop_thread.join();
+            }
+            error_msg = "Failed to initialize DBus thread";
+            return false;
+        }
+
+        is_running = true;
+        request_thread = std::jthread([this](std::stop_token stop) {
+            std::unique_lock<std::mutex> lock(this->request_queue_mutex);
+            while (!stop.stop_requested()) {
+                request_queue_cv.wait(lock, [&] {
+                    return stop.stop_requested() || !this->request_queue.empty();
+                    });
+
+                while (!this->request_queue.empty()) {
+                    auto task = std::move(this->request_queue.front());
+                    this->request_queue.pop_front();
+                    lock.unlock();
+                    task();
+                    lock.lock();
+                }
+            }
+            });
 
         // Parameters for CreateSession (e.g. token so we know the Request ID)
         GVariantBuilder builder;
@@ -643,7 +761,7 @@ class PlatformInputLinux : public IPlatformInput {
             "/org/freedesktop/portal/desktop",
             "org.freedesktop.portal.RemoteDesktop",
             "CreateSession",
-            g_variant_new("(a{sv})", &builder),
+            g_variant_new("(@a{sv})", g_variant_builder_end(&builder)),
             G_VARIANT_TYPE("(o)"),
             G_DBUS_CALL_FLAGS_NONE,
             -1, // default timeout
@@ -658,14 +776,13 @@ class PlatformInputLinux : public IPlatformInput {
         } else {
             const gchar* request_path = nullptr;
             g_variant_get(result, "(&o)", &request_path);
-            create_request_path = request_path;
             std::cout << "CreateSession requested successfully. Request path: " << request_path << std::endl;
             g_variant_unref(result);
 
             // Waiting for the portal authorization chain to complete (requires system or user action), max 10 seconds
             std::cout << "Waiting (max 10 seconds) for the Portal session to start and external permissions to be granted..." << std::endl;
             std::unique_lock<std::mutex> lock(session_mutex);
-            if (session_cv.wait_for(lock, std::chrono::seconds(10), [this] { return this->is_session_ready; })) {
+            if (session_cv.wait_for(lock, std::chrono::seconds(10), [this] { return this->is_session_ready.load(std::memory_order_relaxed); })) {
                 std::cout << "Portal authorized immediately! JS code can continue." << std::endl;
                 return true;
             } else {
@@ -689,6 +806,13 @@ class PlatformInputLinux : public IPlatformInput {
             }
             g_main_loop_unref(main_loop);
         }
+        if (dbus_context) {
+            g_main_context_unref(dbus_context);
+        }
+        if (request_thread.joinable()) {
+            request_thread.request_stop();
+        }
+        request_queue_cv.notify_all();
         if (response_signal_id > 0 && connection) {
             g_dbus_connection_signal_unsubscribe(connection, response_signal_id);
         }
@@ -700,6 +824,7 @@ class PlatformInputLinux : public IPlatformInput {
     void MoveMouseRelative(int32_t x, int32_t y) override {
         if (!is_session_ready) return;
 
+        const std::string session_handle = GetSessionHandle();
         GVariantBuilder options_builder;
         g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
 
@@ -711,7 +836,7 @@ class PlatformInputLinux : public IPlatformInput {
                 "/org/freedesktop/portal/desktop",
                 "org.freedesktop.portal.RemoteDesktop",
                 "NotifyPointerMotion",
-                g_variant_new("(oa{sv}dd)", session_handle.c_str(), &options_builder, (double)x, (double)y),
+                g_variant_new("(o@a{sv}dd)", session_handle.c_str(), g_variant_builder_end(&options_builder), (double)x, (double)y),
                 nullptr,
                 G_DBUS_CALL_FLAGS_NONE,
                 -1,
@@ -736,7 +861,7 @@ class PlatformInputLinux : public IPlatformInput {
             "/org/freedesktop/portal/desktop",
             "org.freedesktop.portal.RemoteDesktop",
             "NotifyPointerMotion",
-            g_variant_new("(oa{sv}dd)", session_handle.c_str(), &options_builder, (double)x, (double)y),
+            g_variant_new("(o@a{sv}dd)", session_handle.c_str(), g_variant_builder_end(&options_builder), (double)x, (double)y),
             nullptr,
             G_DBUS_CALL_FLAGS_NONE,
             -1,
@@ -749,6 +874,7 @@ class PlatformInputLinux : public IPlatformInput {
     void MoveMouseAbsolute(int32_t x, int32_t y) override {
         if (!is_session_ready) return;
 
+        const std::string session_handle = GetSessionHandle();
         GVariantBuilder options_builder;
         g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
 
@@ -760,7 +886,7 @@ class PlatformInputLinux : public IPlatformInput {
                 "/org/freedesktop/portal/desktop",
                 "org.freedesktop.portal.RemoteDesktop",
                 "NotifyPointerMotionAbsolute",
-                g_variant_new("(oa{sv}udd)", session_handle.c_str(), &options_builder, 0, (double)x, (double)y),
+                g_variant_new("(o@a{sv}udd)", session_handle.c_str(), g_variant_builder_end(&options_builder), 0, (double)x, (double)y),
                 nullptr,
                 G_DBUS_CALL_FLAGS_NONE,
                 -1,
@@ -785,7 +911,7 @@ class PlatformInputLinux : public IPlatformInput {
             "/org/freedesktop/portal/desktop",
             "org.freedesktop.portal.RemoteDesktop",
             "NotifyPointerMotionAbsolute",
-            g_variant_new("(oa{sv}udd)", session_handle.c_str(), &options_builder, 0, (double)x, (double)y),
+            g_variant_new("(o@a{sv}udd)", session_handle.c_str(), g_variant_builder_end(&options_builder), 0, (double)x, (double)y),
             nullptr,
             G_DBUS_CALL_FLAGS_NONE,
             -1,
@@ -798,6 +924,7 @@ class PlatformInputLinux : public IPlatformInput {
     void MouseClick(int32_t button, bool down) override {
         if (!is_session_ready) return;
 
+        const std::string session_handle = GetSessionHandle();
         GVariantBuilder options_builder;
         g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
 
@@ -814,7 +941,7 @@ class PlatformInputLinux : public IPlatformInput {
                 "/org/freedesktop/portal/desktop",
                 "org.freedesktop.portal.RemoteDesktop",
                 "NotifyPointerButton",
-                g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder, linux_button, state),
+                g_variant_new("(o@a{sv}iu)", session_handle.c_str(), g_variant_builder_end(&options_builder), (int32_t)linux_button, state),
                 nullptr,
                 G_DBUS_CALL_FLAGS_NONE,
                 -1,
@@ -839,7 +966,7 @@ class PlatformInputLinux : public IPlatformInput {
             "/org/freedesktop/portal/desktop",
             "org.freedesktop.portal.RemoteDesktop",
             "NotifyPointerButton",
-            g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder, linux_button, state),
+            g_variant_new("(o@a{sv}iu)", session_handle.c_str(), g_variant_builder_end(&options_builder), (int32_t)linux_button, state),
             nullptr,
             G_DBUS_CALL_FLAGS_NONE,
             -1,
@@ -852,6 +979,7 @@ class PlatformInputLinux : public IPlatformInput {
     void KeyPress(int32_t keyCode, bool down) override {
         if (!is_session_ready) return;
 
+        const std::string session_handle = GetSessionHandle();
         GVariantBuilder options_builder;
         g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
 
@@ -885,7 +1013,7 @@ class PlatformInputLinux : public IPlatformInput {
                 "/org/freedesktop/portal/desktop",
                 "org.freedesktop.portal.RemoteDesktop",
                 "NotifyKeyboardKeycode",
-                g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder, evdev_code, state),
+                g_variant_new("(o@a{sv}iu)", session_handle.c_str(), g_variant_builder_end(&options_builder), (int32_t)evdev_code, state),
                 nullptr,
                 G_DBUS_CALL_FLAGS_NONE,
                 -1,
@@ -910,7 +1038,7 @@ class PlatformInputLinux : public IPlatformInput {
             "/org/freedesktop/portal/desktop",
             "org.freedesktop.portal.RemoteDesktop",
             "NotifyKeyboardKeycode",
-            g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder, evdev_code, state),
+            g_variant_new("(o@a{sv}iu)", session_handle.c_str(), g_variant_builder_end(&options_builder), (int32_t)evdev_code, state),
             nullptr,
             G_DBUS_CALL_FLAGS_NONE,
             -1,
@@ -923,22 +1051,24 @@ class PlatformInputLinux : public IPlatformInput {
     void TypeCharacter(uint32_t charCode) override {
         if (!is_session_ready) return;
 
+        const std::string session_handle = GetSessionHandle();
         uint32_t codepoint = static_cast<uint32_t>(charCode);
 
         auto sleep_ms = [](int ms) {
             std::this_thread::sleep_for(std::chrono::milliseconds(ms));
-        };
+            };
 
         auto send_key = [&](uint32_t evdev, bool down) {
             GVariantBuilder options_builder;
             g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
+            uint32_t state = down ? 1 : 0;
             GVariant* result = g_dbus_connection_call_sync(
                 connection,
                 "org.freedesktop.portal.Desktop",
                 "/org/freedesktop/portal/desktop",
                 "org.freedesktop.portal.RemoteDesktop",
                 "NotifyKeyboardKeycode",
-                g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder, (int32_t)evdev, down ? 1 : 0),
+                g_variant_new("(o@a{sv}iu)", session_handle.c_str(), g_variant_builder_end(&options_builder), (int32_t)evdev, state),
                 nullptr,
                 G_DBUS_CALL_FLAGS_NONE,
                 -1,
@@ -965,7 +1095,7 @@ class PlatformInputLinux : public IPlatformInput {
             g_variant_builder_init(&options_builder1, G_VARIANT_TYPE_VARDICT);
             g_dbus_connection_call_sync(connection, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
                 "org.freedesktop.portal.RemoteDesktop", "NotifyKeyboardKeysym",
-                g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder1, (int32_t)codepoint, 1),
+                g_variant_new("(o@a{sv}iu)", session_handle.c_str(), g_variant_builder_end(&options_builder1), (int32_t)codepoint, 1),
                 nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr);
 
             sleep_ms(6);
@@ -974,7 +1104,7 @@ class PlatformInputLinux : public IPlatformInput {
             g_variant_builder_init(&options_builder2, G_VARIANT_TYPE_VARDICT);
             g_dbus_connection_call_sync(connection, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
                 "org.freedesktop.portal.RemoteDesktop", "NotifyKeyboardKeysym",
-                g_variant_new("(oa{sv}iu)", session_handle.c_str(), &options_builder2, (int32_t)codepoint, 0),
+                g_variant_new("(o@a{sv}iu)", session_handle.c_str(), g_variant_builder_end(&options_builder2), (int32_t)codepoint, 0),
                 nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr);
 
             sleep_ms(12);
