@@ -454,6 +454,9 @@ class PlatformInputLinux : public IPlatformInput {
                                     if (!sender_str.empty() && sender_str[0] == ':') {
                                         sender_str.erase(0, 1);
                                     }
+                                    if (!sender_str.empty() && sender_str[0] >= '0' && sender_str[0] <= '9') {
+                                        sender_str = "u" + sender_str;
+                                    }
                                     for (char& c : sender_str) {
                                         if (c == '.') c = '_';
                                     }
@@ -465,7 +468,14 @@ class PlatformInputLinux : public IPlatformInput {
                                 std::lock_guard<std::mutex> lock(self->session_mutex);
                                 self->session_handle = session_handle_str;
                             }
-                            self->EnqueuePortalTask([self]() { SelectDevices(self); });
+                            if (self->dbus_context) {
+                                g_main_context_invoke(self->dbus_context, [](gpointer user_data) -> gboolean {
+                                    SelectDevices(static_cast<PlatformInputLinux*>(user_data));
+                                    return G_SOURCE_REMOVE;
+                                    }, self);
+                            } else {
+                                self->EnqueuePortalTask([self]() { SelectDevices(self); });
+                            }
                         } else {
                             std::cerr << "Portal response session_handle string was null." << std::endl;
                             self->session_cv.notify_all();
@@ -495,13 +505,29 @@ class PlatformInputLinux : public IPlatformInput {
                     self,
                     nullptr
                 );
+                if (self->dbus_context) {
+                    g_main_context_invoke(self->dbus_context, [](gpointer user_data) -> gboolean {
+                        StartSession(static_cast<PlatformInputLinux*>(user_data));
+                        return G_SOURCE_REMOVE;
+                        }, self);
+                } else {
+                    self->EnqueuePortalTask([self]() { StartSession(self); });
+                }
             } else {
                 std::cerr << "Clipboard access denied. Continuing without clipboard. Response: " << response << std::endl;
+                self->session_cv.notify_all();
             }
         } else if (is_select_resp) {
             if (response == 0) {
                 std::cout << "SelectDevices completed successfully." << std::endl;
-                self->EnqueuePortalTask([self]() { StartSession(self); });
+                if (self->dbus_context) {
+                    g_main_context_invoke(self->dbus_context, [](gpointer user_data) -> gboolean {
+                        RequestClipboard(static_cast<PlatformInputLinux*>(user_data));
+                        return G_SOURCE_REMOVE;
+                        }, self);
+                } else {
+                    self->EnqueuePortalTask([self]() { RequestClipboard(self); });
+                }
             } else {
                 std::cerr << "SelectDevices denied. Response: " << response << std::endl;
                 self->session_cv.notify_all();
@@ -510,7 +536,6 @@ class PlatformInputLinux : public IPlatformInput {
             if (response == 0) {
                 std::cout << "RemoteDesktop session successfully STARTed! Ready for input injection." << std::endl;
                 self->is_session_ready.store(true);
-                self->EnqueuePortalTask([self]() { RequestClipboard(self); });
                 self->session_cv.notify_all();
             } else {
                 std::cerr << "RemoteDesktop session failed to START. Response: " << response << std::endl;
@@ -613,6 +638,16 @@ class PlatformInputLinux : public IPlatformInput {
             } else {
                 std::cout << "RequestClipboard completed successfully." << std::endl;
             }
+
+            std::cout << "RequestClipboard finished, starting remote desktop session now..." << std::endl;
+            if (self->dbus_context) {
+                g_main_context_invoke(self->dbus_context, [](gpointer user_data) -> gboolean {
+                    StartSession(static_cast<PlatformInputLinux*>(user_data));
+                    return G_SOURCE_REMOVE;
+                    }, self);
+            } else {
+                self->EnqueuePortalTask([self]() { StartSession(self); });
+            }
         }
 
         if (result) {
@@ -670,15 +705,6 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     bool Initialize(std::string& error_msg) override {
-        GError* error = nullptr;
-        connection = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &error);
-        if (!connection) {
-            error_msg = std::string("Failed to connect to D-Bus session bus: ") + error->message;
-            g_error_free(error);
-            return false;
-        }
-        std::cout << "Successfully connected to D-Bus session bus." << std::endl;
-
         std::promise<bool> dbus_ready;
         auto dbus_future = dbus_ready.get_future();
 
@@ -755,6 +781,7 @@ class PlatformInputLinux : public IPlatformInput {
 
         // Call CreateSession
         std::cout << "Requesting RemoteDesktop session..." << std::endl;
+        GError* error = nullptr;
         GVariant* result = g_dbus_connection_call_sync(
             connection,
             "org.freedesktop.portal.Desktop",
