@@ -231,3 +231,4 @@ dist/
 build/
 playground/
 *.txt
+*.diff

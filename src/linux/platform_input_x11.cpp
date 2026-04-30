@@ -41,8 +41,8 @@ static void InitOptionalXkbCommon() {
 
 namespace {
 
-KeySym EvdevToX11KeySym(int32_t evdev) {
-    switch (evdev) {
+    KeySym EvdevToX11KeySym(int32_t evdev) {
+        switch (evdev) {
         case 30: return XK_a;
         case 48: return XK_b;
         case 46: return XK_c;
@@ -99,21 +99,21 @@ KeySym EvdevToX11KeySym(int32_t evdev) {
         case 56: return XK_Alt_L;
         case 100: return XK_Alt_R;
         default: return NoSymbol;
-    }
-}
-
-KeySym CharToKeySym(char32_t cp, bool& needShift) {
-    needShift = false;
-
-    if (cp >= U'a' && cp <= U'z') {
-        return static_cast<KeySym>(cp);
+        }
     }
 
-    if (cp >= U'A' && cp <= U'Z') {
-        needShift = true;
-        return static_cast<KeySym>(cp + 32);
-    }
-    switch (cp) {
+    KeySym CharToKeySym(char32_t cp, bool& needShift) {
+        needShift = false;
+
+        if (cp >= U'a' && cp <= U'z') {
+            return static_cast<KeySym>(cp);
+        }
+
+        if (cp >= U'A' && cp <= U'Z') {
+            needShift = true;
+            return static_cast<KeySym>(cp + 32);
+        }
+        switch (cp) {
         case U' ': return XK_space;
         case U'\n': return XK_Return;
         case U'\r': return XK_Return;
@@ -140,19 +140,74 @@ KeySym CharToKeySym(char32_t cp, bool& needShift) {
         case U'?': needShift = true; return XK_slash;
         case U'~': needShift = true; return XK_grave;
         default: break;
-    }
+        }
 
-    if (cp <= 0x7f) {
-        return static_cast<KeySym>(cp);
-    }
+        if (cp <= 0x7f) {
+            return static_cast<KeySym>(cp);
+        }
 
-    return static_cast<KeySym>(0x01000000u | cp);
-}
+        return static_cast<KeySym>(0x01000000u | cp);
+    }
 
 } // namespace
 
 class X11PlatformInput : public IPlatformInput {
-private:
+
+    bool SetClipboardText(const std::string& text) override {
+        FILE* pipe = popen("xclip -selection clipboard -i", "w");
+        if (!pipe) return false;
+        fwrite(text.data(), 1, text.size(), pipe);
+        return pclose(pipe) == 0;
+    }
+
+    std::optional<std::string> GetClipboardText() override {
+        FILE* pipe = popen("xclip -selection clipboard -o", "r");
+        if (!pipe) return std::nullopt;
+        std::string result;
+        char buffer[128];
+        while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+            result += buffer;
+        }
+        if (pclose(pipe) != 0 && result.empty()) return std::nullopt;
+        return result;
+    }
+
+    bool SetClipboardFiles(const std::vector<std::string>& files) override {
+        FILE* pipe = popen("xclip -selection clipboard -t text/uri-list -i", "w");
+        if (!pipe) return false;
+        for (const auto& file : files) {
+            std::string uri = "file://" + file + "\r\n";
+            fwrite(uri.data(), 1, uri.size(), pipe);
+        }
+        return pclose(pipe) == 0;
+    }
+
+    std::optional<std::vector<std::string>> GetClipboardFiles() override {
+        FILE* pipe = popen("xclip -selection clipboard -t text/uri-list -o", "r");
+        if (!pipe) return std::nullopt;
+        std::vector<std::string> files;
+        char buffer[1024];
+        while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+            std::string line = buffer;
+            if (!line.empty() && line.back() == '\n') line.pop_back();
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            const std::string prefix = "file://";
+            if (line.compare(0, prefix.size(), prefix) == 0) {
+                files.push_back(line.substr(prefix.size()));
+            }
+        }
+        pclose(pipe);
+        return files.empty() ? std::nullopt : std::make_optional(files);
+    }
+
+    bool SetClipboardFilesRemote(const std::vector<std::string>& files) override {
+        return SetClipboardFiles(files);
+    }
+
+    std::optional<std::vector<std::string>> GetClipboardFilesRemote() override {
+        return GetClipboardFiles();
+    }
+    private:
     Display* m_display = nullptr;
     std::vector<KeyCode> m_scratchCodes;
     std::vector<KeySym> m_scratchSyms;
@@ -185,7 +240,14 @@ private:
 
     KeyCode GetScratchForSym(KeySym sym) {
         InitScratch();
-        if (m_scratchCodes.empty()) return 0;
+        
+        // Fallback if no empty keys are found: use max_keycode
+        if (m_scratchCodes.empty()) {
+            int min_keycode = 0, max_keycode = 0;
+            XDisplayKeycodes(m_display, &min_keycode, &max_keycode);
+            m_scratchCodes.push_back(max_keycode);
+            m_scratchSyms.push_back(NoSymbol);
+        }
 
         // Re-use an existing scratch key if already mapped
         for (size_t i = 0; i < m_scratchCodes.size(); ++i) {
@@ -201,7 +263,7 @@ private:
         KeyCode code = m_scratchCodes[idx];
         m_scratchSyms[idx] = sym;
 
-        KeySym newSyms[2] = { sym, sym }; 
+        KeySym newSyms[2] = { sym, sym };
         XChangeKeyboardMapping(m_display, code, 2, newSyms, 1);
         XSync(m_display, False);
 
@@ -241,7 +303,7 @@ private:
         usleep(1000);
     }
 
-public:
+    public:
     X11PlatformInput() {
         m_display = XOpenDisplay(nullptr);
         if (m_display == nullptr) {
@@ -376,7 +438,7 @@ public:
             // aby uniknąć błędów wyścigów w target aplikacji
             keyCode = GetScratchForSym(keySym);
             needShift = false; // Został przypisany wprost!
-            
+
             if (keyCode == 0) {
                 fprintf(stderr, "[X11 WARN] Brak pustego przycisku dla znaku U+%04X\n", codepoint);
                 return;
@@ -390,17 +452,25 @@ public:
             if (shiftCode) {
                 XTestFakeKeyEvent(m_display, shiftCode, True, CurrentTime);
                 XSync(m_display, False);
+                usleep(1000 * 14);
             }
         }
 
         XTestFakeKeyEvent(m_display, keyCode, True, CurrentTime);
+        XSync(m_display, False);
+        usleep(1000 * 16);
+        
         XTestFakeKeyEvent(m_display, keyCode, False, CurrentTime);
         XSync(m_display, False);
+        usleep(1000 * 20);
 
         if (shiftCode) {
             XTestFakeKeyEvent(m_display, shiftCode, False, CurrentTime);
             XSync(m_display, False);
+            usleep(1000 * 10);
         }
+        
+        usleep(1000 * 35);
     }
 
     void ExecuteEvents(const std::vector<InputEvent>& events) override {

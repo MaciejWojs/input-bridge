@@ -15,11 +15,9 @@
 * feat: update TypeCharacter handling to support Unicode codepoints ([f3b515e](https://github.com/MaciejWojs/input-bridge/commit/f3b515e))
 * chotr: update TypeScript version and workspace name in lockfile ([93c824f](https://github.com/MaciejWojs/input-bridge/commit/93c824f))
 * fix/correct type of passed arguments for x11 input platform ([aca1c06](https://github.com/MaciejWojs/input-bridge/commit/aca1c06))
-* chore: remove unused prebuildify:all script from package.json ([1cdb894](https://github.com/MaciejWojs/input-bridge/commit/1cdb894))
 
 ## 0.1.0 (2026-04-11)
 
-* v0.1.0 ([a2a76d6](https://github.com/MaciejWojs/input-bridge/commit/a2a76d6))
 * fix: add pkg-config flags for Linux platform input ([0bfcbdb](https://github.com/MaciejWojs/input-bridge/commit/0bfcbdb))
 * fix: remove branch specification from build trigger in build.yml ([c01b22d](https://github.com/MaciejWojs/input-bridge/commit/c01b22d))
 * feat: add conditional check for tag builds in build-prebuilds job ([c6d6240](https://github.com/MaciejWojs/input-bridge/commit/c6d6240))

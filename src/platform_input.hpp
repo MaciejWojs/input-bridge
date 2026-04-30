@@ -39,6 +39,24 @@ class IPlatformInput {
 
     virtual bool Initialize(std::string& error_msg) { return true; }
 
+    // Clipboard API
+    // Sets text to clipboard. Returns true on success.
+    virtual bool SetClipboardText(const std::string& text) = 0;
+    // Gets text from clipboard. Returns std::nullopt if unavailable.
+    virtual std::optional<std::string> GetClipboardText() = 0;
+    // Sets file paths to clipboard (CF_HDROP). Returns true on success.
+    virtual bool SetClipboardFiles(const std::vector<std::string>& filePaths) = 0;
+    // Gets file paths from clipboard (CF_HDROP). Returns std::nullopt if unavailable.
+    virtual std::optional<std::vector<std::string>> GetClipboardFiles() = 0;
+
+    // Sets files into a remote-capable clipboard format, including file descriptor
+    // and stream contents. This is required for Remote Desktop/redirected clipboard
+    // file transfer.
+    virtual bool SetClipboardFilesRemote(const std::vector<std::string>& filePaths) = 0;
+    // Gets file descriptors from a remote-capable clipboard format. Returns file names
+    // if available, or std::nullopt otherwise.
+    virtual std::optional<std::vector<std::string>> GetClipboardFilesRemote() = 0;
+
     void SetLogCallback(std::function<void(const std::string&)> cb) {
         m_log = cb;
     }
