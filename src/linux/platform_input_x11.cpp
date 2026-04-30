@@ -11,6 +11,7 @@
 
 #include <unistd.h>
 #include <dlfcn.h>
+#include <mutex>
 
 #include <cctype>
 #include <cstdio>
@@ -153,11 +154,18 @@ namespace {
 
 class X11PlatformInput : public IPlatformInput {
 
+    ClipboardChangeCallback m_clipboardCallback;
+    std::mutex clipboard_callback_mutex;
+
     bool SetClipboardText(const std::string& text) override {
         FILE* pipe = popen("xclip -selection clipboard -i", "w");
         if (!pipe) return false;
         fwrite(text.data(), 1, text.size(), pipe);
-        return pclose(pipe) == 0;
+        bool ok = pclose(pipe) == 0;
+        if (ok) {
+            EmitClipboardChange("text", {}, text);
+        }
+        return ok;
     }
 
     std::optional<std::string> GetClipboardText() override {
@@ -179,7 +187,11 @@ class X11PlatformInput : public IPlatformInput {
             std::string uri = "file://" + file + "\r\n";
             fwrite(uri.data(), 1, uri.size(), pipe);
         }
-        return pclose(pipe) == 0;
+        bool ok = pclose(pipe) == 0;
+        if (ok) {
+            EmitClipboardChange("files", files, {});
+        }
+        return ok;
     }
 
     std::optional<std::vector<std::string>> GetClipboardFiles() override {
@@ -206,6 +218,22 @@ class X11PlatformInput : public IPlatformInput {
 
     std::optional<std::vector<std::string>> GetClipboardFilesRemote() override {
         return GetClipboardFiles();
+    }
+
+    void SetClipboardChangeCallback(ClipboardChangeCallback cb) override {
+        std::lock_guard<std::mutex> lock(clipboard_callback_mutex);
+        m_clipboardCallback = std::move(cb);
+    }
+
+    void EmitClipboardChange(const std::string& type, const std::vector<std::string>& files, const std::string& text) {
+        ClipboardChangeCallback callback;
+        {
+            std::lock_guard<std::mutex> lock(clipboard_callback_mutex);
+            callback = m_clipboardCallback;
+        }
+        if (callback) {
+            callback(type, files, text);
+        }
     }
     private:
     Display* m_display = nullptr;
@@ -240,7 +268,7 @@ class X11PlatformInput : public IPlatformInput {
 
     KeyCode GetScratchForSym(KeySym sym) {
         InitScratch();
-        
+
         // Fallback if no empty keys are found: use max_keycode
         if (m_scratchCodes.empty()) {
             int min_keycode = 0, max_keycode = 0;
@@ -459,7 +487,7 @@ class X11PlatformInput : public IPlatformInput {
         XTestFakeKeyEvent(m_display, keyCode, True, CurrentTime);
         XSync(m_display, False);
         usleep(1000 * 16);
-        
+
         XTestFakeKeyEvent(m_display, keyCode, False, CurrentTime);
         XSync(m_display, False);
         usleep(1000 * 20);
@@ -469,7 +497,7 @@ class X11PlatformInput : public IPlatformInput {
             XSync(m_display, False);
             usleep(1000 * 10);
         }
-        
+
         usleep(1000 * 35);
     }
 

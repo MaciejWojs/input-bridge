@@ -57,6 +57,11 @@ class IPlatformInput {
     // if available, or std::nullopt otherwise.
     virtual std::optional<std::vector<std::string>> GetClipboardFilesRemote() = 0;
 
+    using ClipboardChangeCallback = std::function<void(const std::string& type, const std::vector<std::string>& files, const std::string& text)>;
+    virtual void SetClipboardChangeCallback(ClipboardChangeCallback cb) {
+        (void)cb;
+    }
+
     void SetLogCallback(std::function<void(const std::string&)> cb) {
         m_log = cb;
     }

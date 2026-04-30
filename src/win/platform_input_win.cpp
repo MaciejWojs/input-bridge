@@ -10,6 +10,11 @@
 #include <fstream>
 #include <string>
 #include <vector>
+#include <atomic>
+#include <condition_variable>
+#include <functional>
+#include <mutex>
+#include <thread>
 
 static std::wstring Utf8ToWide(const std::string& utf8) {
     if (utf8.empty()) return {};
@@ -23,6 +28,15 @@ static std::wstring GetFileName(const std::wstring& fullPath) {
     size_t pos = fullPath.find_last_of(L"\\/");
     if (pos == std::wstring::npos) return fullPath;
     return fullPath.substr(pos + 1);
+}
+
+static std::string WideToUtf8(const std::wstring& wide) {
+    if (wide.empty()) return {};
+    int utf8Len = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (utf8Len <= 0) return {};
+    std::string result(utf8Len - 1, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, result.data(), utf8Len, nullptr, nullptr);
+    return result;
 }
 
 static HGLOBAL DuplicateGlobalHandle(HGLOBAL source) {
@@ -297,6 +311,162 @@ class RemoteFileDataObject : public IDataObject {
 class PlatformInputWin : public IPlatformInput {
     private:
     std::vector<INPUT> m_winInputs;
+    ClipboardChangeCallback m_clipboardCallback;
+    std::thread m_clipboardThread;
+    std::atomic<bool> m_clipboardThreadRunning{ false };
+    std::mutex m_clipboardMutex;
+    std::condition_variable m_clipboardReady;
+    HWND m_clipboardWindow = nullptr;
+
+    static LRESULT CALLBACK ClipboardWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+        if (message == WM_CREATE) {
+            AddClipboardFormatListener(hwnd);
+            return 0;
+        }
+
+        if (message == WM_DESTROY) {
+            RemoveClipboardFormatListener(hwnd);
+            PostQuitMessage(0);
+            return 0;
+        }
+
+        if (message == WM_CLIPBOARDUPDATE) {
+            PlatformInputWin* self = reinterpret_cast<PlatformInputWin*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+            if (self) {
+                self->HandleClipboardUpdate();
+            }
+            return 0;
+        }
+
+        return DefWindowProcW(hwnd, message, wParam, lParam);
+    }
+
+    void HandleClipboardUpdate() {
+        std::vector<std::string> files;
+        std::string text;
+
+        if (OpenClipboard(nullptr)) {
+            if (IsClipboardFormatAvailable(CF_HDROP)) {
+                HANDLE hData = GetClipboardData(CF_HDROP);
+                if (hData) {
+                    HDROP hDrop = static_cast<HDROP>(hData);
+                    UINT count = DragQueryFileW(hDrop, 0xFFFFFFFF, nullptr, 0);
+                    for (UINT i = 0; i < count; ++i) {
+                        UINT len = DragQueryFileW(hDrop, i, nullptr, 0) + 1;
+                        std::wstring path(len, L'\0');
+                        DragQueryFileW(hDrop, i, path.data(), len);
+                        if (!path.empty() && path.back() == L'\0') {
+                            path.pop_back();
+                        }
+                        files.push_back(WideToUtf8(path));
+                    }
+                }
+            }
+
+            if (files.empty() && IsClipboardFormatAvailable(CF_UNICODETEXT)) {
+                HANDLE hData = GetClipboardData(CF_UNICODETEXT);
+                if (hData) {
+                    wchar_t* wstr = static_cast<wchar_t*>(GlobalLock(hData));
+                    if (wstr) {
+                        text = WideToUtf8(wstr);
+                        GlobalUnlock(hData);
+                    }
+                }
+            }
+            CloseClipboard();
+        }
+
+        ClipboardChangeCallback callbackCopy;
+        {
+            std::lock_guard<std::mutex> lock(m_clipboardMutex);
+            callbackCopy = m_clipboardCallback;
+        }
+
+        if (!callbackCopy) return;
+
+        if (!files.empty()) {
+            callbackCopy("files", files, std::string());
+        } else if (!text.empty()) {
+            callbackCopy("text", {}, text);
+        }
+    }
+
+    void RunClipboardMessageLoop() {
+        std::wstring className = L"InputBridgeClipboardListenerWindow_" + std::to_wstring(reinterpret_cast<uintptr_t>(this));
+        WNDCLASSEXW wc = { 0 };
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = ClipboardWindowProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = className.c_str();
+
+        if (!RegisterClassExW(&wc)) {
+            std::lock_guard<std::mutex> lock(m_clipboardMutex);
+            m_clipboardThreadRunning = false;
+            m_clipboardReady.notify_all();
+            return;
+        }
+
+        HWND hwnd = CreateWindowExW(0, className.c_str(), L"InputBridgeClipboardListener", 0,
+            0, 0, 0, 0, HWND_MESSAGE, nullptr, wc.hInstance, nullptr);
+        if (!hwnd) {
+            UnregisterClassW(className.c_str(), wc.hInstance);
+            std::lock_guard<std::mutex> lock(m_clipboardMutex);
+            m_clipboardThreadRunning = false;
+            m_clipboardReady.notify_all();
+            return;
+        }
+
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+
+        {
+            std::lock_guard<std::mutex> lock(m_clipboardMutex);
+            m_clipboardWindow = hwnd;
+            m_clipboardReady.notify_all();
+        }
+
+        MSG msg;
+        while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+
+        DestroyWindow(hwnd);
+        UnregisterClassW(className.c_str(), wc.hInstance);
+
+        {
+            std::lock_guard<std::mutex> lock(m_clipboardMutex);
+            m_clipboardWindow = nullptr;
+            m_clipboardThreadRunning = false;
+        }
+    }
+
+    void EnsureClipboardThread() {
+        bool expected = false;
+        if (!m_clipboardThreadRunning.compare_exchange_strong(expected, true)) {
+            return;
+        }
+
+        m_clipboardThread = std::thread([this]() {
+            RunClipboardMessageLoop();
+            });
+
+        std::unique_lock<std::mutex> lock(m_clipboardMutex);
+        m_clipboardReady.wait(lock, [this] { return m_clipboardWindow != nullptr || !m_clipboardThreadRunning.load(); });
+    }
+
+    void StopClipboardThread() {
+        HWND hwnd = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(m_clipboardMutex);
+            hwnd = m_clipboardWindow;
+        }
+        if (hwnd) {
+            PostMessageW(hwnd, WM_CLOSE, 0, 0);
+        }
+        if (m_clipboardThread.joinable()) {
+            m_clipboardThread.join();
+        }
+    }
 
     public:
     PlatformInputWin() {
@@ -307,6 +477,20 @@ class PlatformInputWin : public IPlatformInput {
     bool Initialize(std::string& error_msg) override {
         // Windows input injection generally does not require session authorization
         return true;
+    }
+
+    void SetClipboardChangeCallback(ClipboardChangeCallback cb) override {
+        {
+            std::lock_guard<std::mutex> lock(m_clipboardMutex);
+            m_clipboardCallback = std::move(cb);
+        }
+        if (m_clipboardCallback) {
+            EnsureClipboardThread();
+        }
+    }
+
+    ~PlatformInputWin() override {
+        StopClipboardThread();
     }
 
     void MoveMouseRelative(int32_t x, int32_t y) override {

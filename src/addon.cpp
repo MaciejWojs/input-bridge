@@ -71,6 +71,8 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
             InstanceMethod("toggleOptimization", &InputBridge::ToggleOptimization),
             InstanceMethod("flush", &InputBridge::Flush),
             InstanceMethod("setLogger", &InputBridge::SetLogger),
+            InstanceMethod("onClipboard", &InputBridge::OnClipboard),
+            InstanceMethod("offClipboard", &InputBridge::OffClipboard),
             InstanceMethod("setClipboardText", &InputBridge::SetClipboardText),
             InstanceMethod("getClipboardText", &InputBridge::GetClipboardText),
             InstanceMethod("setClipboardFiles", &InputBridge::SetClipboardFiles),
@@ -93,7 +95,8 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
             Napi::TypeError::New(info.Env(), "Expected text as string").ThrowAsJavaScriptException();
             return info.Env().Undefined();
         }
-        bool ok = m_queue.GetPlatform()->SetClipboardText(info[0].As<Napi::String>().Utf8Value());
+        std::string text = info[0].As<Napi::String>().Utf8Value();
+        bool ok = m_queue.GetPlatform()->SetClipboardText(text);
         return Napi::Boolean::New(info.Env(), ok);
     }
 
@@ -195,9 +198,24 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
         std::string m_errorMsg;
     };
 
+    struct ClipboardEventData {
+        std::string type;
+        std::vector<std::string> files;
+        std::string text;
+    };
+
     explicit InputBridge(const Napi::CallbackInfo& info)
         : Napi::ObjectWrap<InputBridge>(info),
         m_queue(CreatePlatformInput()) {
+    }
+
+    ~InputBridge() {
+        if (m_queue.GetPlatform()) {
+            m_queue.GetPlatform()->SetClipboardChangeCallback({});
+        }
+        if (m_clipboardTsfn) {
+            m_clipboardTsfn.Release();
+        }
     }
 
     private:
@@ -215,6 +233,66 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
 
     InputQueue m_queue;
     Napi::FunctionReference m_logger;
+    Napi::ThreadSafeFunction m_clipboardTsfn;
+
+    Napi::Value OnClipboard(const Napi::CallbackInfo& info) {
+        if (info.Length() < 1 || !info[0].IsFunction()) {
+            Napi::TypeError::New(info.Env(), "Expected a callback function").ThrowAsJavaScriptException();
+            return info.Env().Undefined();
+        }
+
+        if (m_clipboardTsfn) {
+            m_clipboardTsfn.Release();
+            m_clipboardTsfn = Napi::ThreadSafeFunction();
+        }
+
+        m_clipboardTsfn = Napi::ThreadSafeFunction::New(
+            info.Env(),
+            info[0].As<Napi::Function>(),
+            "ClipboardEvent",
+            0,
+            1
+        );
+
+        if (m_queue.GetPlatform()) {
+            m_queue.GetPlatform()->SetClipboardChangeCallback([this](const std::string& type, const std::vector<std::string>& files, const std::string& text) {
+                if (!m_clipboardTsfn) return;
+
+                auto* eventData = new ClipboardEventData{ type, files, text };
+                napi_status status = m_clipboardTsfn.BlockingCall(eventData, [](Napi::Env env, Napi::Function jsCallback, ClipboardEventData* data) {
+                    Napi::Object event = Napi::Object::New(env);
+                    event.Set("type", data->type);
+                    if (data->type == "files") {
+                        Napi::Array arr = Napi::Array::New(env, data->files.size());
+                        for (size_t i = 0; i < data->files.size(); ++i) {
+                            arr[i] = Napi::String::New(env, data->files[i]);
+                        }
+                        event.Set("data", arr);
+                    } else {
+                        event.Set("data", Napi::String::New(env, data->text));
+                    }
+                    jsCallback.Call({ event });
+                    delete data;
+                    });
+                if (status != napi_ok) {
+                    delete eventData;
+                }
+                });
+        }
+
+        return info.Env().Undefined();
+    }
+
+    Napi::Value OffClipboard(const Napi::CallbackInfo& info) {
+        if (m_queue.GetPlatform()) {
+            m_queue.GetPlatform()->SetClipboardChangeCallback({});
+        }
+        if (m_clipboardTsfn) {
+            m_clipboardTsfn.Release();
+            m_clipboardTsfn = Napi::ThreadSafeFunction();
+        }
+        return info.Env().Undefined();
+    }
 
     Napi::Value InitAsync(const Napi::CallbackInfo& info) {
         Napi::Env env = info.Env();

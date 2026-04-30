@@ -23,6 +23,8 @@ class PlatformInputLinux : public IPlatformInput {
     std::mutex clipboard_mutex;
     std::map<std::string, std::string> m_clipboardData;
     guint clipboard_signal_id = 0;
+    ClipboardChangeCallback m_clipboardCallback;
+    std::mutex clipboard_callback_mutex;
 
     bool SetClipboardText(const std::string& text) override {
         if (!is_session_ready) return false;
@@ -63,6 +65,7 @@ class PlatformInputLinux : public IPlatformInput {
             return false;
         }
         if (result) g_variant_unref(result);
+        EmitClipboardChange("text", {}, text);
         return true;
     }
 
@@ -158,6 +161,7 @@ class PlatformInputLinux : public IPlatformInput {
             return false;
         }
         if (result) g_variant_unref(result);
+        EmitClipboardChange("files", files, {});
         return true;
     }
 
@@ -227,6 +231,22 @@ class PlatformInputLinux : public IPlatformInput {
 
     std::optional<std::vector<std::string>> GetClipboardFilesRemote() override {
         return GetClipboardFiles();
+    }
+
+    void SetClipboardChangeCallback(ClipboardChangeCallback cb) override {
+        std::lock_guard<std::mutex> lock(clipboard_callback_mutex);
+        m_clipboardCallback = std::move(cb);
+    }
+
+    void EmitClipboardChange(const std::string& type, const std::vector<std::string>& files, const std::string& text) {
+        ClipboardChangeCallback callback;
+        {
+            std::lock_guard<std::mutex> lock(clipboard_callback_mutex);
+            callback = m_clipboardCallback;
+        }
+        if (callback) {
+            callback(type, files, text);
+        }
     }
 
     private:
