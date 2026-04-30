@@ -5,6 +5,20 @@ import nodeGypBuild from 'node-gyp-build';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+export type ClipboardEventType = 'text' | 'files';
+
+export interface ClipboardEvent {
+    /**
+     * The type of clipboard update.
+     */
+    type: ClipboardEventType;
+
+    /**
+     * Clipboard payload. For `text`, this is a string. For `files`, this is an array of file paths.
+     */
+    data: string | string[];
+}
+
 /**
  * Interface representing the native input bridge for simulating hardware events.
  * Actions are queued and must be dispatched using `flush()`.
@@ -261,6 +275,36 @@ export interface IInputBridge {
     setLogger(callback: (msg: string) => void): void;
 
     /**
+     * Registers a callback to receive clipboard push events.
+     * The callback is invoked whenever `setClipboardText` or `setClipboardFiles` succeeds.
+     * 
+     * @param callback - The function to call with clipboard event data.
+     * @throws {TypeError} If `callback` is not a function.
+     * 
+     * @example
+     * ```typescript
+     * bridge.onClipboard((event) => {
+     *   if (event.type === 'text') {
+     *     console.log('Text copied:', event.data);
+     *   } else {
+     *     console.log('Files copied:', event.data);
+     *   }
+     * });
+     * ```
+     */
+    onClipboard(callback: (event: ClipboardEvent) => void): void;
+
+    /**
+     * Removes the registered clipboard event listener.
+     * 
+     * @example
+     * ```typescript
+     * bridge.offClipboard();
+     * ```
+     */
+    offClipboard(): void;
+
+    /**
      * Simulates a hardware key press using a standard `KeyboardEvent.code` string, 
      * acting as a universal Plug-and-Play mechanism.
      * 
@@ -387,6 +431,14 @@ export class InputBridge implements IInputBridge {
 
     setLogger(callback: (msg: string) => void): void {
         this.nativeBridge.setLogger(callback);
+    }
+
+    onClipboard(callback: (event: ClipboardEvent) => void): void {
+        this.nativeBridge.onClipboard(callback);
+    }
+
+    offClipboard(): void {
+        this.nativeBridge.offClipboard();
     }
 
     keyPressDOM(domCode: string, down: boolean): boolean {
