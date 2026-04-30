@@ -273,11 +273,11 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
                     }
                     jsCallback.Call({ event });
                     delete data;
-                });
+                    });
                 if (status != napi_ok) {
                     delete eventData;
                 }
-            });
+                });
         }
 
         return info.Env().Undefined();

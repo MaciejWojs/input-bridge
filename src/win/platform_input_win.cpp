@@ -448,7 +448,7 @@ class PlatformInputWin : public IPlatformInput {
 
         m_clipboardThread = std::thread([this]() {
             RunClipboardMessageLoop();
-        });
+            });
 
         std::unique_lock<std::mutex> lock(m_clipboardMutex);
         m_clipboardReady.wait(lock, [this] { return m_clipboardWindow != nullptr || !m_clipboardThreadRunning.load(); });
