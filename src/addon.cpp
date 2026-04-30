@@ -97,9 +97,6 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
         }
         std::string text = info[0].As<Napi::String>().Utf8Value();
         bool ok = m_queue.GetPlatform()->SetClipboardText(text);
-        if (ok) {
-            EmitClipboardEvent(info.Env(), "text", Napi::String::New(info.Env(), text));
-        }
         return Napi::Boolean::New(info.Env(), ok);
     }
 
@@ -124,13 +121,6 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
             paths.push_back(v.As<Napi::String>().Utf8Value());
         }
         bool ok = m_queue.GetPlatform()->SetClipboardFiles(paths);
-        if (ok) {
-            Napi::Array arr = Napi::Array::New(info.Env(), paths.size());
-            for (uint32_t i = 0; i < paths.size(); ++i) {
-                arr[i] = Napi::String::New(info.Env(), paths[i]);
-            }
-            EmitClipboardEvent(info.Env(), "files", arr);
-        }
         return Napi::Boolean::New(info.Env(), ok);
     }
 
@@ -159,13 +149,6 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
             paths.push_back(v.As<Napi::String>().Utf8Value());
         }
         bool ok = m_queue.GetPlatform()->SetClipboardFilesRemote(paths);
-        if (ok) {
-            Napi::Array arr = Napi::Array::New(info.Env(), paths.size());
-            for (uint32_t i = 0; i < paths.size(); ++i) {
-                arr[i] = Napi::String::New(info.Env(), paths[i]);
-            }
-            EmitClipboardEvent(info.Env(), "files", arr);
-        }
         return Napi::Boolean::New(info.Env(), ok);
     }
 
@@ -215,9 +198,24 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
         std::string m_errorMsg;
     };
 
+    struct ClipboardEventData {
+        std::string type;
+        std::vector<std::string> files;
+        std::string text;
+    };
+
     explicit InputBridge(const Napi::CallbackInfo& info)
         : Napi::ObjectWrap<InputBridge>(info),
         m_queue(CreatePlatformInput()) {
+    }
+
+    ~InputBridge() {
+        if (m_queue.GetPlatform()) {
+            m_queue.GetPlatform()->SetClipboardChangeCallback({});
+        }
+        if (m_clipboardTsfn) {
+            m_clipboardTsfn.Release();
+        }
     }
 
     private:
@@ -235,27 +233,64 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
 
     InputQueue m_queue;
     Napi::FunctionReference m_logger;
-    Napi::FunctionReference m_clipboardListener;
-
-    void EmitClipboardEvent(Napi::Env env, const std::string& type, Napi::Value data) {
-        if (m_clipboardListener.IsEmpty()) return;
-        Napi::Object event = Napi::Object::New(env);
-        event.Set("type", type);
-        event.Set("data", data);
-        m_clipboardListener.Call({ event });
-    }
+    Napi::ThreadSafeFunction m_clipboardTsfn;
 
     Napi::Value OnClipboard(const Napi::CallbackInfo& info) {
         if (info.Length() < 1 || !info[0].IsFunction()) {
             Napi::TypeError::New(info.Env(), "Expected a callback function").ThrowAsJavaScriptException();
             return info.Env().Undefined();
         }
-        m_clipboardListener = Napi::Persistent(info[0].As<Napi::Function>());
+
+        if (m_clipboardTsfn) {
+            m_clipboardTsfn.Release();
+            m_clipboardTsfn = Napi::ThreadSafeFunction();
+        }
+
+        m_clipboardTsfn = Napi::ThreadSafeFunction::New(
+            info.Env(),
+            info[0].As<Napi::Function>(),
+            "ClipboardEvent",
+            0,
+            1
+        );
+
+        if (m_queue.GetPlatform()) {
+            m_queue.GetPlatform()->SetClipboardChangeCallback([this](const std::string& type, const std::vector<std::string>& files, const std::string& text) {
+                if (!m_clipboardTsfn) return;
+
+                auto* eventData = new ClipboardEventData{ type, files, text };
+                napi_status status = m_clipboardTsfn.BlockingCall(eventData, [](Napi::Env env, Napi::Function jsCallback, ClipboardEventData* data) {
+                    Napi::Object event = Napi::Object::New(env);
+                    event.Set("type", data->type);
+                    if (data->type == "files") {
+                        Napi::Array arr = Napi::Array::New(env, data->files.size());
+                        for (size_t i = 0; i < data->files.size(); ++i) {
+                            arr[i] = Napi::String::New(env, data->files[i]);
+                        }
+                        event.Set("data", arr);
+                    } else {
+                        event.Set("data", Napi::String::New(env, data->text));
+                    }
+                    jsCallback.Call({ event });
+                    delete data;
+                });
+                if (status != napi_ok) {
+                    delete eventData;
+                }
+            });
+        }
+
         return info.Env().Undefined();
     }
 
     Napi::Value OffClipboard(const Napi::CallbackInfo& info) {
-        m_clipboardListener.Reset();
+        if (m_queue.GetPlatform()) {
+            m_queue.GetPlatform()->SetClipboardChangeCallback({});
+        }
+        if (m_clipboardTsfn) {
+            m_clipboardTsfn.Release();
+            m_clipboardTsfn = Napi::ThreadSafeFunction();
+        }
         return info.Env().Undefined();
     }
 
