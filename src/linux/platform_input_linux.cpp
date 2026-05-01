@@ -14,7 +14,6 @@
 #include <condition_variable>
 #include <chrono>
 #include <map>
-#include <deque>
 #include <functional>
 #include <dlfcn.h>
 
@@ -263,18 +262,6 @@ class PlatformInputLinux : public IPlatformInput {
 
     std::mutex session_mutex;
     std::condition_variable session_cv;
-    std::mutex request_queue_mutex;
-    std::condition_variable request_queue_cv;
-    std::deque<std::function<void()>> request_queue;
-    std::jthread request_thread;
-
-    void EnqueuePortalTask(std::function<void()> task) {
-        {
-            std::lock_guard<std::mutex> lock(request_queue_mutex);
-            request_queue.emplace_back(std::move(task));
-        }
-        request_queue_cv.notify_one();
-    }
 
     std::string GetSessionHandle() {
         std::lock_guard<std::mutex> lock(session_mutex);
@@ -361,75 +348,73 @@ class PlatformInputLinux : public IPlatformInput {
             }
         }
 
-        self->EnqueuePortalTask([self, current_session_handle, serial, mime = std::move(mime), data_to_send = std::move(data_to_send)]() mutable {
-            if (data_to_send.empty()) {
-                g_dbus_connection_call_sync(
-                    self->connection, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
-                    "org.freedesktop.portal.Clipboard", "SelectionWriteDone",
-                    g_variant_new("(oub)", current_session_handle.c_str(), serial, FALSE),
-                    nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr
-                );
-                return;
-            }
-
-            GError* error = nullptr;
-            GUnixFDList* out_fd_list = nullptr;
-            GVariant* result = g_dbus_connection_call_with_unix_fd_list_sync(
-                self->connection,
-                "org.freedesktop.portal.Desktop",
-                "/org/freedesktop/portal/desktop",
-                "org.freedesktop.portal.Clipboard",
-                "SelectionWrite",
-                g_variant_new("(ou)", current_session_handle.c_str(), serial),
-                G_VARIANT_TYPE("(h)"),
-                G_DBUS_CALL_FLAGS_NONE,
-                -1,
-                nullptr,
-                &out_fd_list,
-                nullptr,
-                &error
-            );
-
-            if (error) {
-                std::cerr << "Failed to call SelectionWrite: " << error->message << std::endl;
-                g_error_free(error);
-                g_dbus_connection_call_sync(
-                    self->connection, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
-                    "org.freedesktop.portal.Clipboard", "SelectionWriteDone",
-                    g_variant_new("(oub)", current_session_handle.c_str(), serial, FALSE),
-                    nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr
-                );
-                return;
-            }
-
-            gint handle_index;
-            g_variant_get(result, "(h)", &handle_index);
-            int fd = g_unix_fd_list_get(out_fd_list, handle_index, nullptr);
-
-            if (fd >= 0) {
-                const char* data_ptr = data_to_send.data();
-                size_t remaining = data_to_send.size();
-                while (remaining > 0) {
-                    ssize_t written = write(fd, data_ptr, remaining);
-                    if (written <= 0) {
-                        break;
-                    }
-                    data_ptr += written;
-                    remaining -= static_cast<size_t>(written);
-                }
-                close(fd);
-            }
-
-            if (out_fd_list) g_object_unref(out_fd_list);
-            if (result) g_variant_unref(result);
-
+        if (data_to_send.empty()) {
             g_dbus_connection_call_sync(
                 self->connection, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
                 "org.freedesktop.portal.Clipboard", "SelectionWriteDone",
-                g_variant_new("(oub)", current_session_handle.c_str(), serial, TRUE),
+                g_variant_new("(oub)", current_session_handle.c_str(), serial, FALSE),
                 nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr
             );
-            });
+            return;
+        }
+
+        GError* error = nullptr;
+        GUnixFDList* out_fd_list = nullptr;
+        GVariant* result = g_dbus_connection_call_with_unix_fd_list_sync(
+            self->connection,
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.Clipboard",
+            "SelectionWrite",
+            g_variant_new("(ou)", current_session_handle.c_str(), serial),
+            G_VARIANT_TYPE("(h)"),
+            G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            nullptr,
+            &out_fd_list,
+            nullptr,
+            &error
+        );
+
+        if (error) {
+            std::cerr << "Failed to call SelectionWrite: " << error->message << std::endl;
+            g_error_free(error);
+            g_dbus_connection_call_sync(
+                self->connection, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.Clipboard", "SelectionWriteDone",
+                g_variant_new("(oub)", current_session_handle.c_str(), serial, FALSE),
+                nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr
+            );
+            return;
+        }
+
+        gint handle_index;
+        g_variant_get(result, "(h)", &handle_index);
+        int fd = g_unix_fd_list_get(out_fd_list, handle_index, nullptr);
+
+        if (fd >= 0) {
+            const char* data_ptr = data_to_send.data();
+            size_t remaining = data_to_send.size();
+            while (remaining > 0) {
+                ssize_t written = write(fd, data_ptr, remaining);
+                if (written <= 0) {
+                    break;
+                }
+                data_ptr += written;
+                remaining -= static_cast<size_t>(written);
+            }
+            close(fd);
+        }
+
+        if (out_fd_list) g_object_unref(out_fd_list);
+        if (result) g_variant_unref(result);
+
+        g_dbus_connection_call_sync(
+            self->connection, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.Clipboard", "SelectionWriteDone",
+            g_variant_new("(oub)", current_session_handle.c_str(), serial, TRUE),
+            nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr
+        );
     }
 
     static void OnPortalResponse(GDBusConnection* connection, const gchar* sender_name,
@@ -488,14 +473,7 @@ class PlatformInputLinux : public IPlatformInput {
                                 std::lock_guard<std::mutex> lock(self->session_mutex);
                                 self->session_handle = session_handle_str;
                             }
-                            if (self->dbus_context) {
-                                g_main_context_invoke(self->dbus_context, [](gpointer user_data) -> gboolean {
-                                    SelectDevices(static_cast<PlatformInputLinux*>(user_data));
-                                    return G_SOURCE_REMOVE;
-                                    }, self);
-                            } else {
-                                self->EnqueuePortalTask([self]() { SelectDevices(self); });
-                            }
+                            SelectDevices(self);
                         } else {
                             std::cerr << "Portal response session_handle string was null." << std::endl;
                             self->session_cv.notify_all();
@@ -525,14 +503,7 @@ class PlatformInputLinux : public IPlatformInput {
                     self,
                     nullptr
                 );
-                if (self->dbus_context) {
-                    g_main_context_invoke(self->dbus_context, [](gpointer user_data) -> gboolean {
-                        StartSession(static_cast<PlatformInputLinux*>(user_data));
-                        return G_SOURCE_REMOVE;
-                        }, self);
-                } else {
-                    self->EnqueuePortalTask([self]() { StartSession(self); });
-                }
+                StartSession(self);
             } else {
                 std::cerr << "Clipboard access denied. Continuing without clipboard. Response: " << response << std::endl;
                 self->session_cv.notify_all();
@@ -540,14 +511,7 @@ class PlatformInputLinux : public IPlatformInput {
         } else if (is_select_resp) {
             if (response == 0) {
                 std::cout << "SelectDevices completed successfully." << std::endl;
-                if (self->dbus_context) {
-                    g_main_context_invoke(self->dbus_context, [](gpointer user_data) -> gboolean {
-                        RequestClipboard(static_cast<PlatformInputLinux*>(user_data));
-                        return G_SOURCE_REMOVE;
-                        }, self);
-                } else {
-                    self->EnqueuePortalTask([self]() { RequestClipboard(self); });
-                }
+                RequestClipboard(self);
             } else {
                 std::cerr << "SelectDevices denied. Response: " << response << std::endl;
                 self->session_cv.notify_all();
@@ -660,14 +624,7 @@ class PlatformInputLinux : public IPlatformInput {
             }
 
             std::cout << "RequestClipboard finished, starting remote desktop session now..." << std::endl;
-            if (self->dbus_context) {
-                g_main_context_invoke(self->dbus_context, [](gpointer user_data) -> gboolean {
-                    StartSession(static_cast<PlatformInputLinux*>(user_data));
-                    return G_SOURCE_REMOVE;
-                    }, self);
-            } else {
-                self->EnqueuePortalTask([self]() { StartSession(self); });
-            }
+            StartSession(self);
         }
 
         if (result) {
@@ -775,22 +732,6 @@ class PlatformInputLinux : public IPlatformInput {
         }
 
         is_running = true;
-        request_thread = std::jthread([this](std::stop_token stop) {
-            std::unique_lock<std::mutex> lock(this->request_queue_mutex);
-            while (!stop.stop_requested()) {
-                request_queue_cv.wait(lock, [&] {
-                    return stop.stop_requested() || !this->request_queue.empty();
-                    });
-
-                while (!this->request_queue.empty()) {
-                    auto task = std::move(this->request_queue.front());
-                    this->request_queue.pop_front();
-                    lock.unlock();
-                    task();
-                    lock.lock();
-                }
-            }
-            });
 
         // Parameters for CreateSession (e.g. token so we know the Request ID)
         GVariantBuilder builder;
@@ -827,9 +768,9 @@ class PlatformInputLinux : public IPlatformInput {
             g_variant_unref(result);
 
             // Waiting for the portal authorization chain to complete (requires system or user action), max 10 seconds
-            std::cout << "Waiting (max 10 seconds) for the Portal session to start and external permissions to be granted..." << std::endl;
+            std::cout << "Waiting (max 45 seconds) for the Portal session to start and external permissions to be granted..." << std::endl;
             std::unique_lock<std::mutex> lock(session_mutex);
-            if (session_cv.wait_for(lock, std::chrono::seconds(10), [this] { return this->is_session_ready.load(std::memory_order_relaxed); })) {
+            if (session_cv.wait_for(lock, std::chrono::seconds(45), [this] { return this->is_session_ready.load(std::memory_order_relaxed); })) {
                 std::cout << "Portal authorized immediately! JS code can continue." << std::endl;
                 return true;
             } else {
@@ -856,12 +797,11 @@ class PlatformInputLinux : public IPlatformInput {
         if (dbus_context) {
             g_main_context_unref(dbus_context);
         }
-        if (request_thread.joinable()) {
-            request_thread.request_stop();
-        }
-        request_queue_cv.notify_all();
         if (response_signal_id > 0 && connection) {
             g_dbus_connection_signal_unsubscribe(connection, response_signal_id);
+        }
+        if (clipboard_signal_id > 0 && connection) {
+            g_dbus_connection_signal_unsubscribe(connection, clipboard_signal_id);
         }
         if (connection) {
             g_object_unref(connection);
