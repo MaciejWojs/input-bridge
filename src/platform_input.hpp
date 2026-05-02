@@ -39,6 +39,29 @@ class IPlatformInput {
 
     virtual bool Initialize(std::string& error_msg) { return true; }
 
+    // Linux RemoteDesktop transport controls.
+    // Supported modes are backend-specific. Linux portal backend supports: "notify" and "eis".
+    virtual bool SetInputMode(const std::string& mode, std::string& error_msg) {
+        (void)mode;
+        error_msg = "Input mode is not supported on this platform";
+        return false;
+    }
+
+    virtual std::string GetInputMode() const {
+        return "notify";
+    }
+
+    virtual bool ConnectToEIS(std::string& error_msg) {
+        error_msg = "EIS is not supported on this platform";
+        return false;
+    }
+
+    virtual void DisconnectEIS() {}
+
+    virtual bool IsEISConnected() const {
+        return false;
+    }
+
     // Clipboard API
     // Sets text to clipboard. Returns true on success.
     virtual bool SetClipboardText(const std::string& text) = 0;

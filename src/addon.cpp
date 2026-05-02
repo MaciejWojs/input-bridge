@@ -78,7 +78,12 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
             InstanceMethod("setClipboardFiles", &InputBridge::SetClipboardFiles),
             InstanceMethod("getClipboardFiles", &InputBridge::GetClipboardFiles),
             InstanceMethod("setClipboardFilesRemote", &InputBridge::SetClipboardFilesRemote),
-            InstanceMethod("getClipboardFilesRemote", &InputBridge::GetClipboardFilesRemote)
+            InstanceMethod("getClipboardFilesRemote", &InputBridge::GetClipboardFilesRemote),
+            InstanceMethod("setInputMode", &InputBridge::SetInputMode),
+            InstanceMethod("getInputMode", &InputBridge::GetInputMode),
+            InstanceMethod("connectToEIS", &InputBridge::ConnectToEIS),
+            InstanceMethod("disconnectEIS", &InputBridge::DisconnectEIS),
+            InstanceMethod("isEISConnected", &InputBridge::IsEISConnected)
             });
 
         auto* constructor = new Napi::FunctionReference();
@@ -161,6 +166,46 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
             arr[i] = Napi::String::New(info.Env(), (*result)[i]);
         }
         return arr;
+    }
+
+    Napi::Value SetInputMode(const Napi::CallbackInfo& info) {
+        if (info.Length() < 1 || !info[0].IsString()) {
+            Napi::TypeError::New(info.Env(), "Expected mode as string ('notify' or 'eis')").ThrowAsJavaScriptException();
+            return info.Env().Undefined();
+        }
+
+        std::string mode = info[0].As<Napi::String>().Utf8Value();
+        std::string error_msg;
+        bool ok = m_queue.GetPlatform()->SetInputMode(mode, error_msg);
+        if (!ok && !error_msg.empty()) {
+            Napi::Error::New(info.Env(), error_msg).ThrowAsJavaScriptException();
+            return info.Env().Undefined();
+        }
+
+        return Napi::Boolean::New(info.Env(), ok);
+    }
+
+    Napi::Value GetInputMode(const Napi::CallbackInfo& info) {
+        return Napi::String::New(info.Env(), m_queue.GetPlatform()->GetInputMode());
+    }
+
+    Napi::Value ConnectToEIS(const Napi::CallbackInfo& info) {
+        std::string error_msg;
+        bool ok = m_queue.GetPlatform()->ConnectToEIS(error_msg);
+        if (!ok && !error_msg.empty()) {
+            Napi::Error::New(info.Env(), error_msg).ThrowAsJavaScriptException();
+            return info.Env().Undefined();
+        }
+        return Napi::Boolean::New(info.Env(), ok);
+    }
+
+    Napi::Value DisconnectEIS(const Napi::CallbackInfo& info) {
+        m_queue.GetPlatform()->DisconnectEIS();
+        return info.Env().Undefined();
+    }
+
+    Napi::Value IsEISConnected(const Napi::CallbackInfo& info) {
+        return Napi::Boolean::New(info.Env(), m_queue.GetPlatform()->IsEISConnected());
     }
 
     class InitWorker : public Napi::AsyncWorker {

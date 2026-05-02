@@ -19,6 +19,122 @@
 
 class PlatformInputLinux : public IPlatformInput {
 
+    enum class InputMode {
+        Notify,
+        EIS
+    };
+
+    InputMode input_mode = InputMode::Notify;
+    int eis_fd = -1;
+    std::atomic<bool> eis_connected{ false };
+
+    bool SetInputMode(const std::string& mode, std::string& error_msg) override {
+        if (mode == "notify") {
+            DisconnectEIS();
+            input_mode = InputMode::Notify;
+            return true;
+        }
+        if (mode == "eis") {
+            input_mode = InputMode::EIS;
+            return true;
+        }
+
+        error_msg = "Unsupported mode. Use 'notify' or 'eis'.";
+        return false;
+    }
+
+    std::string GetInputMode() const override {
+        return input_mode == InputMode::EIS ? "eis" : "notify";
+    }
+
+    bool ConnectToEIS(std::string& error_msg) override {
+        if (!is_session_ready.load(std::memory_order_relaxed)) {
+            error_msg = "Session is not ready. Call init() and wait for portal authorization first.";
+            return false;
+        }
+
+        if (eis_connected.load(std::memory_order_relaxed)) {
+            return true;
+        }
+
+        const std::string current_session = GetSessionHandle();
+        if (current_session.empty()) {
+            error_msg = "RemoteDesktop session handle is empty.";
+            return false;
+        }
+
+        GVariantBuilder options_builder;
+        g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
+
+        GError* error = nullptr;
+        GUnixFDList* out_fd_list = nullptr;
+        GVariant* result = g_dbus_connection_call_with_unix_fd_list_sync(
+            connection,
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.RemoteDesktop",
+            "ConnectToEIS",
+            g_variant_new("(o@a{sv})", current_session.c_str(), g_variant_builder_end(&options_builder)),
+            G_VARIANT_TYPE("(h)"),
+            G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            nullptr,
+            &out_fd_list,
+            nullptr,
+            &error
+        );
+
+        if (error) {
+            error_msg = std::string("ConnectToEIS failed: ") + error->message;
+            g_error_free(error);
+            if (out_fd_list) {
+                g_object_unref(out_fd_list);
+            }
+            if (result) {
+                g_variant_unref(result);
+            }
+            return false;
+        }
+
+        gint handle_index = -1;
+        g_variant_get(result, "(h)", &handle_index);
+        int fd = g_unix_fd_list_get(out_fd_list, handle_index, nullptr);
+
+        if (result) {
+            g_variant_unref(result);
+        }
+        if (out_fd_list) {
+            g_object_unref(out_fd_list);
+        }
+
+        if (fd < 0) {
+            error_msg = "ConnectToEIS did not return a valid fd.";
+            return false;
+        }
+
+        eis_fd = fd;
+        eis_connected.store(true, std::memory_order_relaxed);
+        input_mode = InputMode::EIS;
+
+        std::cout << "ConnectToEIS succeeded. EIS fd acquired." << std::endl;
+        return true;
+    }
+
+    void DisconnectEIS() override {
+        if (eis_fd >= 0) {
+            close(eis_fd);
+            eis_fd = -1;
+        }
+        eis_connected.store(false, std::memory_order_relaxed);
+        if (input_mode == InputMode::EIS) {
+            input_mode = InputMode::Notify;
+        }
+    }
+
+    bool IsEISConnected() const override {
+        return eis_connected.load(std::memory_order_relaxed);
+    }
+
     std::mutex clipboard_mutex;
     std::map<std::string, std::string> m_clipboardData;
     guint clipboard_signal_id = 0;
@@ -520,6 +636,14 @@ class PlatformInputLinux : public IPlatformInput {
             if (response == 0) {
                 std::cout << "RemoteDesktop session successfully STARTed! Ready for input injection." << std::endl;
                 self->is_session_ready.store(true);
+                if (self->input_mode == InputMode::EIS) {
+                    std::string eis_error;
+                    if (!self->ConnectToEIS(eis_error)) {
+                        std::cerr << "EIS mode requested but ConnectToEIS failed: " << eis_error
+                            << ". Falling back to notify mode." << std::endl;
+                        self->input_mode = InputMode::Notify;
+                    }
+                }
                 self->session_cv.notify_all();
             } else {
                 std::cerr << "RemoteDesktop session failed to START. Response: " << response << std::endl;
@@ -787,6 +911,7 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     ~PlatformInputLinux() {
+        DisconnectEIS();
         if (main_loop) {
             g_main_loop_quit(main_loop);
             if (loop_thread.joinable()) {
@@ -810,6 +935,10 @@ class PlatformInputLinux : public IPlatformInput {
 
     void MoveMouseRelative(int32_t x, int32_t y) override {
         if (!is_session_ready) return;
+        if (eis_connected.load(std::memory_order_relaxed)) {
+            std::cerr << "MoveMouseRelative blocked: EIS is connected, but EIS sender path is not implemented in this build." << std::endl;
+            return;
+        }
 
         const std::string session_handle = GetSessionHandle();
         GVariantBuilder options_builder;
@@ -860,6 +989,10 @@ class PlatformInputLinux : public IPlatformInput {
 
     void MoveMouseAbsolute(int32_t x, int32_t y) override {
         if (!is_session_ready) return;
+        if (eis_connected.load(std::memory_order_relaxed)) {
+            std::cerr << "MoveMouseAbsolute blocked: EIS is connected, but EIS sender path is not implemented in this build." << std::endl;
+            return;
+        }
 
         const std::string session_handle = GetSessionHandle();
         GVariantBuilder options_builder;
@@ -910,6 +1043,10 @@ class PlatformInputLinux : public IPlatformInput {
 
     void MouseClick(int32_t button, bool down) override {
         if (!is_session_ready) return;
+        if (eis_connected.load(std::memory_order_relaxed)) {
+            std::cerr << "MouseClick blocked: EIS is connected, but EIS sender path is not implemented in this build." << std::endl;
+            return;
+        }
 
         const std::string session_handle = GetSessionHandle();
         GVariantBuilder options_builder;
@@ -965,6 +1102,10 @@ class PlatformInputLinux : public IPlatformInput {
 
     void KeyPress(int32_t keyCode, bool down) override {
         if (!is_session_ready) return;
+        if (eis_connected.load(std::memory_order_relaxed)) {
+            std::cerr << "KeyPress blocked: EIS is connected, but EIS sender path is not implemented in this build." << std::endl;
+            return;
+        }
 
         const std::string session_handle = GetSessionHandle();
         GVariantBuilder options_builder;
@@ -1037,6 +1178,10 @@ class PlatformInputLinux : public IPlatformInput {
 
     void TypeCharacter(uint32_t charCode) override {
         if (!is_session_ready) return;
+        if (eis_connected.load(std::memory_order_relaxed)) {
+            std::cerr << "TypeCharacter blocked: EIS is connected, but EIS sender path is not implemented in this build." << std::endl;
+            return;
+        }
 
         const std::string session_handle = GetSessionHandle();
         uint32_t codepoint = static_cast<uint32_t>(charCode);

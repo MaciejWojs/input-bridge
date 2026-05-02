@@ -26,6 +26,39 @@ export interface ClipboardEvent {
 export interface IInputBridge {
 
     /**
+     * Sets Linux portal input transport mode.
+     * 
+     * Supported values:
+     * - `notify`: legacy `Notify*` D-Bus calls
+     * - `eis`: request EIS transport via `ConnectToEIS`
+     * 
+     * @param mode - Transport mode (`notify` or `eis`).
+     * @returns `true` on success.
+     */
+    setInputMode(mode: 'notify' | 'eis'): boolean;
+
+    /**
+     * Returns currently selected Linux portal input transport mode.
+     */
+    getInputMode(): string;
+
+    /**
+     * Attempts to connect the active RemoteDesktop session to EIS.
+     * Must be called after successful `init()`.
+     */
+    connectToEIS(): boolean;
+
+    /**
+     * Closes active EIS connection and returns to notify mode.
+     */
+    disconnectEIS(): void;
+
+    /**
+     * Indicates whether EIS channel is currently connected.
+     */
+    isEISConnected(): boolean;
+
+    /**
      * Sets the clipboard text (Unicode string).
      *
      * @param text - The text to set to the clipboard.
@@ -379,6 +412,26 @@ export class InputBridge implements IInputBridge {
 
     async init(): Promise<void> {
         return this.nativeBridge.init();
+    }
+
+    setInputMode(mode: 'notify' | 'eis'): boolean {
+        return this.nativeBridge.setInputMode(mode);
+    }
+
+    getInputMode(): string {
+        return this.nativeBridge.getInputMode();
+    }
+
+    connectToEIS(): boolean {
+        return this.nativeBridge.connectToEIS();
+    }
+
+    disconnectEIS(): void {
+        this.nativeBridge.disconnectEIS();
+    }
+
+    isEISConnected(): boolean {
+        return this.nativeBridge.isEISConnected();
     }
 
     moveMouseRelative(x: number, y: number): void {
