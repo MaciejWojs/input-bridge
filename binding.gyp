@@ -35,10 +35,10 @@
 
         ["OS=='linux' and use_x11_backend!=1", {
           "cflags_cc": [
-            "<!@(pkg-config --cflags gio-2.0 gio-unix-2.0 glib-2.0 gobject-2.0 xkbcommon)"
+            "<!@(pkg-config --cflags gio-2.0 gio-unix-2.0 glib-2.0 gobject-2.0 xkbcommon libei-1.0)"
           ],
           "libraries": [
-            "<!@(pkg-config --libs gio-2.0 gio-unix-2.0 glib-2.0 gobject-2.0 xkbcommon)"
+            "<!@(pkg-config --libs gio-2.0 gio-unix-2.0 glib-2.0 gobject-2.0 xkbcommon libei-1.0)"
           ]
         }],
 
