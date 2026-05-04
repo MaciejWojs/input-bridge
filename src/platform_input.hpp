@@ -95,6 +95,19 @@ class IPlatformInput {
         (void)cb;
     }
 
+    /**
+     * Starts global input detection (hooks).
+     * @returns true if successful.
+     */
+    virtual bool StartInputDetection() {
+        return false;
+    }
+
+    /**
+     * Stops global input detection (hooks).
+     */
+    virtual void StopInputDetection() {}
+
     void SetLogCallback(std::function<void(const std::string&)> cb) {
         m_log = cb;
     }

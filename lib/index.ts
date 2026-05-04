@@ -368,6 +368,23 @@ export interface IInputBridge {
     offInput(): void;
 
     /**
+     * Starts global input detection (hooks) on supported platforms (Windows).
+     * Needs to be called to start receiving events via `onInput`.
+     * 
+     * @returns `true` if detection started successfully, `false` otherwise.
+     * 
+     * @platform Windows: Supported. Linux: Not implemented.
+     */
+    startInputDetection(): boolean;
+
+    /**
+     * Stops global input detection (hooks) on supported platforms.
+     * 
+     * @platform Windows: Supported. Linux: Not implemented.
+     */
+    stopInputDetection(): void;
+
+    /**
      * Simulates a hardware key press using a standard `KeyboardEvent.code` string, 
      * acting as a universal Plug-and-Play mechanism.
      * 
@@ -553,6 +570,14 @@ export class InputBridge implements IInputBridge {
         this.nativeBridge.offInput();
     }
 
+    startInputDetection(): boolean {
+        return this.nativeBridge.startInputDetection();
+    }
+
+    stopInputDetection(): void {
+        this.nativeBridge.stopInputDetection();
+    }
+
     /**
      * Stops the auto-flush timer if it is running.
      * Call this before discarding the instance to clean up resources.
@@ -597,7 +622,7 @@ export class InputBridge implements IInputBridge {
     getClipboardFilesRemote(): string[] | null {
         return this.nativeBridge.getClipboardFilesRemote();
     }
-    
+
 }
 
 export default { InputBridge };

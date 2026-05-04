@@ -75,6 +75,8 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
             InstanceMethod("offClipboard", &InputBridge::OffClipboard),
             InstanceMethod("onInput", &InputBridge::OnInput),
             InstanceMethod("offInput", &InputBridge::OffInput),
+            InstanceMethod("startInputDetection", &InputBridge::StartInputDetection),
+            InstanceMethod("stopInputDetection", &InputBridge::StopInputDetection),
             InstanceMethod("setClipboardText", &InputBridge::SetClipboardText),
             InstanceMethod("getClipboardText", &InputBridge::GetClipboardText),
             InstanceMethod("setClipboardFiles", &InputBridge::SetClipboardFiles),
@@ -441,6 +443,21 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
         if (m_inputTsfn) {
             m_inputTsfn.Release();
             m_inputTsfn = Napi::ThreadSafeFunction();
+        }
+        return info.Env().Undefined();
+    }
+
+    Napi::Value StartInputDetection(const Napi::CallbackInfo& info) {
+        if (m_queue.GetPlatform()) {
+            bool ok = m_queue.GetPlatform()->StartInputDetection();
+            return Napi::Boolean::New(info.Env(), ok);
+        }
+        return Napi::Boolean::New(info.Env(), false);
+    }
+
+    Napi::Value StopInputDetection(const Napi::CallbackInfo& info) {
+        if (m_queue.GetPlatform()) {
+            m_queue.GetPlatform()->StopInputDetection();
         }
         return info.Env().Undefined();
     }
