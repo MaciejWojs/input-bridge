@@ -218,6 +218,9 @@ class PlatformInputLinux : public IPlatformInput {
         return eis_connected.load(std::memory_order_relaxed);
     }
 
+    // If portal Notify* calls are rejected we avoid repeated attempts
+    bool portal_notify_allowed = true;
+
     std::mutex clipboard_mutex;
     std::map<std::string, std::string> m_clipboardData;
     guint clipboard_signal_id = 0;
@@ -457,6 +460,11 @@ class PlatformInputLinux : public IPlatformInput {
         bool connected = false;
         bool pending_disconnect = false;
         bool started = false;
+        bool has_pointer = false;
+        bool has_pointer_absolute = false;
+        bool has_button = false;
+        bool has_keyboard = false;
+        bool has_scroll = false;
         uint32_t sequence = 0;
     };
 
@@ -561,6 +569,20 @@ class PlatformInputLinux : public IPlatformInput {
                             if (m_eis.device) {
                                 ei_device_ref(m_eis.device);
                                 m_eis.connected = true;
+                                // Query capabilities and cache them to avoid calling
+                                // keyboard APIs on non-keyboard devices.
+                                m_eis.has_pointer = ei_device_has_capability(m_eis.device, EI_DEVICE_CAP_POINTER);
+                                m_eis.has_pointer_absolute = ei_device_has_capability(m_eis.device, EI_DEVICE_CAP_POINTER_ABSOLUTE);
+                                m_eis.has_button = ei_device_has_capability(m_eis.device, EI_DEVICE_CAP_BUTTON);
+                                m_eis.has_keyboard = ei_device_has_capability(m_eis.device, EI_DEVICE_CAP_KEYBOARD);
+                                m_eis.has_scroll = ei_device_has_capability(m_eis.device, EI_DEVICE_CAP_SCROLL);
+                                Log(std::string("EIS device added; capabilities: ") +
+                                    (m_eis.has_pointer ? "pointer " : "") +
+                                    (m_eis.has_pointer_absolute ? "pointer_abs " : "") +
+                                    (m_eis.has_button ? "button " : "") +
+                                    (m_eis.has_keyboard ? "keyboard " : "") +
+                                    (m_eis.has_scroll ? "scroll " : "")
+                                );
                             }
                         }
                         break;
@@ -606,6 +628,10 @@ class PlatformInputLinux : public IPlatformInput {
 
     bool SendEISKeycode(uint32_t evdev_code, bool down) {
         if (!HasEISDevice()) {
+            return false;
+        }
+        if (!m_eis.has_keyboard) {
+            Log(std::string("EIS: device lacks keyboard capability, falling back"));
             return false;
         }
         ei_device_keyboard_key(m_eis.device, evdev_code, down);
@@ -674,14 +700,36 @@ class PlatformInputLinux : public IPlatformInput {
             if (!HasEISDevice()) {
                 return;
             }
-            ei_device_keyboard_key(m_eis.device, evdev, true);
+            if (m_eis.has_keyboard) {
+                // Send via EIS
+                SendEISKeycode(evdev, true);
+            } else {
+                // Fallback to portal NotifyKeyboardKeycode (guarded)
+                if (this->portal_notify_allowed) {
+                    bool ok = SendKeyboardKeycode(this->connection, this->GetSessionHandle(), evdev, true);
+                    if (!ok) {
+                        this->portal_notify_allowed = false;
+                        Log("EIS: portal NotifyKeyboardKeycode not allowed; disabling Notify fallback");
+                    }
+                }
+            }
         };
 
         auto key_up = [this](uint32_t evdev) {
             if (!HasEISDevice()) {
                 return;
             }
-            ei_device_keyboard_key(m_eis.device, evdev, false);
+            if (m_eis.has_keyboard) {
+                SendEISKeycode(evdev, false);
+            } else {
+                if (this->portal_notify_allowed) {
+                    bool ok = SendKeyboardKeycode(this->connection, this->GetSessionHandle(), evdev, false);
+                    if (!ok) {
+                        this->portal_notify_allowed = false;
+                        Log("EIS: portal NotifyKeyboardKeycode not allowed; disabling Notify fallback");
+                    }
+                }
+            }
         };
 
         auto tap_key = [this, &key_down, &key_up](uint32_t evdev) {
@@ -1512,8 +1560,11 @@ class PlatformInputLinux : public IPlatformInput {
                     return;
                 }
 
-                SendEISKeycode(evdev_code, down);
-                return;
+                // Try sending via EIS; if device doesn't support keyboard, fall back to Notify
+                if (SendEISKeycode(evdev_code, down)) {
+                    return;
+                }
+                // else fall through to portal NotifyKeyboardKeycode fallback
             }
         }
 #endif
