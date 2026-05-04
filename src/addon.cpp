@@ -77,6 +77,7 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
             InstanceMethod("offInput", &InputBridge::OffInput),
             InstanceMethod("startInputDetection", &InputBridge::StartInputDetection),
             InstanceMethod("stopInputDetection", &InputBridge::StopInputDetection),
+            InstanceMethod("optimizeInputDetection", &InputBridge::OptimizeInputDetection),
             InstanceMethod("setClipboardText", &InputBridge::SetClipboardText),
             InstanceMethod("getClipboardText", &InputBridge::GetClipboardText),
             InstanceMethod("setClipboardFiles", &InputBridge::SetClipboardFiles),
@@ -464,6 +465,18 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
     Napi::Value StopInputDetection(const Napi::CallbackInfo& info) {
         if (m_queue.GetPlatform()) {
             m_queue.GetPlatform()->StopInputDetection();
+        }
+        return info.Env().Undefined();
+    }
+
+    Napi::Value OptimizeInputDetection(const Napi::CallbackInfo& info) {
+        if (info.Length() < 1 || !info[0].IsNumber()) {
+            Napi::TypeError::New(info.Env(), "Expected distanceThreshold as number").ThrowAsJavaScriptException();
+            return info.Env().Undefined();
+        }
+        int threshold = info[0].As<Napi::Number>().Int32Value();
+        if (m_queue.GetPlatform()) {
+            m_queue.GetPlatform()->SetDetectionOptimizationThreshold(threshold);
         }
         return info.Env().Undefined();
     }

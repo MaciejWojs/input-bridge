@@ -101,6 +101,15 @@ class IPlatformInput {
     }
 
     /**
+     * Sets the distance threshold (in pixels) for optimizing detected mouse movements.
+     * Movements smaller than this threshold will be dropped by the hook.
+     * @param distanceThreshold 0 disables optimization.
+     */
+    virtual void SetDetectionOptimizationThreshold(int distanceThreshold) {
+        (void)distanceThreshold;
+    }
+
+    /**
      * Starts global input detection (hooks).
      * @returns true if successful.
      */

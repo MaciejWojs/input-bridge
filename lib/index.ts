@@ -386,6 +386,14 @@ export interface IInputBridge {
     stopInputDetection(): void;
 
     /**
+     * Sets the distance threshold for optimizing detected input moves (hooks).
+     * Movements smaller than this threshold will be filtered out.
+     * 
+     * @param distanceThreshold - The distance threshold in pixels. 0 disables optimization.
+     */
+    optimizeInputDetection(distanceThreshold: number): void;
+
+    /**
      * Simulates a hardware key press using a standard `KeyboardEvent.code` string, 
      * acting as a universal Plug-and-Play mechanism.
      * 
@@ -577,6 +585,10 @@ export class InputBridge implements IInputBridge {
 
     stopInputDetection(): void {
         this.nativeBridge.stopInputDetection();
+    }
+
+    optimizeInputDetection(distanceThreshold: number): void {
+        this.nativeBridge.optimizeInputDetection(distanceThreshold);
     }
 
     /**

@@ -327,6 +327,10 @@ class PlatformInputWin : public IPlatformInput {
     HHOOK m_kbHook = nullptr;
     HHOOK m_msHook = nullptr;
 
+    std::atomic<int> m_detectionDistanceThreshold{ 0 };
+    std::atomic<int> m_lastDetectedMouseX{ -1 };
+    std::atomic<int> m_lastDetectedMouseY{ -1 };
+
     static PlatformInputWin* s_instance;
 
     static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
@@ -355,11 +359,26 @@ class PlatformInputWin : public IPlatformInput {
         if (nCode == HC_ACTION && s_instance && s_instance->m_inputCallback) {
             MSLLHOOKSTRUCT* pmshs = reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
             if (wParam == WM_MOUSEMOVE) {
-                // Drop if distance to last emitted is too small and optimization logic allows
-                // TODO: For distance threshold optimization in events!
+                int x = static_cast<int32_t>(pmshs->pt.x);
+                int y = static_cast<int32_t>(pmshs->pt.y);
+                int threshold = s_instance->m_detectionDistanceThreshold.load(std::memory_order_relaxed);
+                int lastX = s_instance->m_lastDetectedMouseX.load(std::memory_order_relaxed);
+                int lastY = s_instance->m_lastDetectedMouseY.load(std::memory_order_relaxed);
+
+                if (threshold > 0 && lastX != -1) {
+                    long long dx = static_cast<long long>(x) - lastX;
+                    long long dy = static_cast<long long>(y) - lastY;
+                    if ((dx * dx + dy * dy) < static_cast<long long>(threshold * threshold)) {
+                        return CallNextHookEx(nullptr, nCode, wParam, lParam);
+                    }
+                }
+
+                s_instance->m_lastDetectedMouseX.store(x, std::memory_order_relaxed);
+                s_instance->m_lastDetectedMouseY.store(y, std::memory_order_relaxed);
+
                 ::MouseMoveAbsolute mm;
-                mm.x = static_cast<int32_t>(pmshs->pt.x);
-                mm.y = static_cast<int32_t>(pmshs->pt.y);
+                mm.x = x;
+                mm.y = y;
                 InputEvent ev = mm;
                 s_instance->m_inputCallback(ev);
             } else if (wParam == WM_LBUTTONDOWN || wParam == WM_LBUTTONUP) {
@@ -921,6 +940,10 @@ class PlatformInputWin : public IPlatformInput {
             return true; // Already running
         }
 
+        // Reset positions to ensure the first movement is always captured
+        m_lastDetectedMouseX.store(-1, std::memory_order_relaxed);
+        m_lastDetectedMouseY.store(-1, std::memory_order_relaxed);
+
         m_inputDetectionThread = std::jthread([this]() {
             RunInputDetectionLoop();
             });
@@ -953,6 +976,10 @@ class PlatformInputWin : public IPlatformInput {
 
     void SetInputEventCallback(InputEventCallback cb) override {
         m_inputCallback = cb;
+    }
+
+    void SetDetectionOptimizationThreshold(int distanceThreshold) override {
+        m_detectionDistanceThreshold.store(distanceThreshold, std::memory_order_relaxed);
     }
 };
 
