@@ -18,7 +18,12 @@ enum class InputRoute {
 struct MouseMoveRelative { int32_t x; int32_t y; };
 struct MouseMoveAbsolute { int32_t x; int32_t y; };
 struct MouseClick { int32_t button; bool down; };
-struct KeyPress { int32_t keyCode; bool down; InputRoute routedTo = InputRoute::Keyboard; };
+struct KeyPress {
+    int32_t keyCode;
+    bool down;
+    InputRoute routedTo = InputRoute::Keyboard;
+    std::string domCode = "";
+};
 struct MouseScroll { int32_t delta; };
 struct TypeCharacter { uint32_t charCode; InputRoute routedTo = InputRoute::Unicode; };
 

@@ -319,7 +319,7 @@ class PlatformInputWin : public IPlatformInput {
     HWND m_clipboardWindow = nullptr;
 
     InputEventCallback m_inputCallback;
-    std::thread m_inputDetectionThread;
+    std::jthread m_inputDetectionThread;
     std::atomic<bool> m_inputDetectionRunning{ false };
     std::mutex m_inputDetectionMutex;
     std::condition_variable m_inputDetectionReady;
@@ -332,10 +332,19 @@ class PlatformInputWin : public IPlatformInput {
     static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
         if (nCode == HC_ACTION && s_instance && s_instance->m_inputCallback) {
             KBDLLHOOKSTRUCT* pkbhs = reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
-            // Example conversion to an InputEvent (KeyPress)
             ::KeyPress kp;
             kp.keyCode = static_cast<int32_t>(pkbhs->vkCode);
             kp.down = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
+
+            char name[256];
+            LONG scancode = pkbhs->scanCode << 16;
+            if (pkbhs->flags & LLKHF_EXTENDED) {
+                scancode |= 0x01000000;
+            }
+            if (GetKeyNameTextA(scancode, name, 256) > 0) {
+                kp.domCode = std::string(name);
+            }
+
             InputEvent ev = kp;
             s_instance->m_inputCallback(ev);
         }
@@ -346,7 +355,8 @@ class PlatformInputWin : public IPlatformInput {
         if (nCode == HC_ACTION && s_instance && s_instance->m_inputCallback) {
             MSLLHOOKSTRUCT* pmshs = reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
             if (wParam == WM_MOUSEMOVE) {
-                // MSLLHOOKSTRUCT gives absolute coordinates
+                // Drop if distance to last emitted is too small and optimization logic allows
+                // TODO: For distance threshold optimization in events!
                 ::MouseMoveAbsolute mm;
                 mm.x = static_cast<int32_t>(pmshs->pt.x);
                 mm.y = static_cast<int32_t>(pmshs->pt.y);
@@ -911,7 +921,7 @@ class PlatformInputWin : public IPlatformInput {
             return true; // Already running
         }
 
-        m_inputDetectionThread = std::thread([this]() {
+        m_inputDetectionThread = std::jthread([this]() {
             RunInputDetectionLoop();
             });
 

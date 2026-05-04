@@ -36,6 +36,7 @@ export interface InputEvent {
     keyCode?: number;
     charCode?: number;
     delta?: number;
+    domCode?: string;
 }
 
 /**

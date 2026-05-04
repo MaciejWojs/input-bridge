@@ -264,6 +264,7 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
         int32_t keyCode = 0;
         uint32_t charCode = 0;
         int32_t delta = 0;
+        std::string domCode = "";
     };
 
     explicit InputBridge(const Napi::CallbackInfo& info)
@@ -398,6 +399,8 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
                 } else if (auto p = std::get_if<::KeyPress>(&ev)) {
                     data->type = "key_press";
                     data->keyCode = p->keyCode; data->down = p->down;
+                    // Note: We don't have domCode prop yet in InputEventData, let's add it.
+                    data->domCode = p->domCode;
                 } else if (auto p = std::get_if<::MouseScroll>(&ev)) {
                     data->type = "mouse_scroll";
                     data->delta = p->delta;
@@ -418,6 +421,9 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
                     } else if (data->type == "key_press") {
                         ev.Set("keyCode", Napi::Number::New(env, data->keyCode));
                         ev.Set("down", Napi::Boolean::New(env, data->down));
+                        if (!data->domCode.empty()) {
+                            ev.Set("domCode", Napi::String::New(env, data->domCode));
+                        }
                     } else if (data->type == "mouse_scroll") {
                         ev.Set("delta", Napi::Number::New(env, data->delta));
                     } else if (data->type == "type_character") {
@@ -425,12 +431,12 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
                     }
                     jsCallback.Call({ ev });
                     delete data;
-                });
+                    });
 
                 if (status != napi_ok) {
                     delete data;
                 }
-            });
+                });
         }
 
         return info.Env().Undefined();
