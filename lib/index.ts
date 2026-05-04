@@ -411,6 +411,9 @@ import { mapDomCodeToNativeTarget } from './dom_mapper.js';
  * - `autoFlush`: If true, automatically calls `flush()` after every input action.
  *   Disable this if you want to batch multiple actions together for performance.
  *   @default false
+ * - `flushIntervalMs`: If set to a positive number, automatically flushes queued input events
+ *   at this interval (in milliseconds). If 0 or negative, auto-flush is disabled.
+ *   @default 0 (disabled)
  */
 export interface InputBridgeOptions {
     /**
@@ -419,6 +422,14 @@ export interface InputBridgeOptions {
      * @default false
      */
     autoFlush?: boolean;
+
+    /**
+     * If set to a positive number, automatically flushes queued input events
+     * at this interval (in milliseconds). Helps prevent blocking Node.js event loop
+     * by batching events and flushing them periodically.
+     * @default 0 (disabled)
+     */
+    flushIntervalMs?: number;
 }
 
 /**
@@ -434,10 +445,20 @@ export class InputBridge implements IInputBridge {
 
     private nativeBridge: IInputBridge;
     public autoFlush: boolean;
+    private flushIntervalMs: number;
+    private flushTimer: NodeJS.Timeout | null = null;
 
     constructor(options?: InputBridgeOptions) {
         this.nativeBridge = new native.InputBridge();
         this.autoFlush = options?.autoFlush ?? false;
+        this.flushIntervalMs = options?.flushIntervalMs ?? 0;
+
+        // Start auto-flush timer if interval is specified
+        if (this.flushIntervalMs > 0) {
+            this.flushTimer = setInterval(() => {
+                this.flush();
+            }, this.flushIntervalMs);
+        }
     }
 
     async init(): Promise<void> {
@@ -530,6 +551,17 @@ export class InputBridge implements IInputBridge {
 
     offInput(): void {
         this.nativeBridge.offInput();
+    }
+
+    /**
+     * Stops the auto-flush timer if it is running.
+     * Call this before discarding the instance to clean up resources.
+     */
+    stopAutoFlush(): void {
+        if (this.flushTimer !== null) {
+            clearInterval(this.flushTimer);
+            this.flushTimer = null;
+        }
     }
 
     keyPressDOM(domCode: string, down: boolean): boolean {
