@@ -73,6 +73,8 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
             InstanceMethod("setLogger", &InputBridge::SetLogger),
             InstanceMethod("onClipboard", &InputBridge::OnClipboard),
             InstanceMethod("offClipboard", &InputBridge::OffClipboard),
+            InstanceMethod("onInput", &InputBridge::OnInput),
+            InstanceMethod("offInput", &InputBridge::OffInput),
             InstanceMethod("setClipboardText", &InputBridge::SetClipboardText),
             InstanceMethod("getClipboardText", &InputBridge::GetClipboardText),
             InstanceMethod("setClipboardFiles", &InputBridge::SetClipboardFiles),
@@ -249,6 +251,19 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
         std::string text;
     };
 
+    struct InputEventData {
+        std::string type;
+        std::vector<std::string> _pad_files;
+        std::string _pad_text;
+        int32_t x = 0;
+        int32_t y = 0;
+        int32_t button = 0;
+        bool down = false;
+        int32_t keyCode = 0;
+        uint32_t charCode = 0;
+        int32_t delta = 0;
+    };
+
     explicit InputBridge(const Napi::CallbackInfo& info)
         : Napi::ObjectWrap<InputBridge>(info),
         m_queue(CreatePlatformInput()) {
@@ -257,9 +272,13 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
     ~InputBridge() {
         if (m_queue.GetPlatform()) {
             m_queue.GetPlatform()->SetClipboardChangeCallback({});
+            m_queue.GetPlatform()->SetInputEventCallback({});
         }
         if (m_clipboardTsfn) {
             m_clipboardTsfn.Release();
+        }
+        if (m_inputTsfn) {
+            m_inputTsfn.Release();
         }
     }
 
@@ -279,6 +298,7 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
     InputQueue m_queue;
     Napi::FunctionReference m_logger;
     Napi::ThreadSafeFunction m_clipboardTsfn;
+    Napi::ThreadSafeFunction m_inputTsfn;
 
     Napi::Value OnClipboard(const Napi::CallbackInfo& info) {
         if (info.Length() < 1 || !info[0].IsFunction()) {
@@ -335,6 +355,92 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
         if (m_clipboardTsfn) {
             m_clipboardTsfn.Release();
             m_clipboardTsfn = Napi::ThreadSafeFunction();
+        }
+        return info.Env().Undefined();
+    }
+
+    Napi::Value OnInput(const Napi::CallbackInfo& info) {
+        if (info.Length() < 1 || !info[0].IsFunction()) {
+            Napi::TypeError::New(info.Env(), "Expected a callback function").ThrowAsJavaScriptException();
+            return info.Env().Undefined();
+        }
+
+        if (m_inputTsfn) {
+            m_inputTsfn.Release();
+            m_inputTsfn = Napi::ThreadSafeFunction();
+        }
+
+        m_inputTsfn = Napi::ThreadSafeFunction::New(
+            info.Env(),
+            info[0].As<Napi::Function>(),
+            "InputEvent",
+            0,
+            1
+        );
+
+        if (m_queue.GetPlatform()) {
+            m_queue.GetPlatform()->SetInputEventCallback([this](const InputEvent& ev) {
+                if (!m_inputTsfn) return;
+
+                auto* data = new InputEventData();
+
+                if (auto p = std::get_if<::MouseMoveRelative>(&ev)) {
+                    data->type = "mouse_move_relative";
+                    data->x = p->x; data->y = p->y;
+                } else if (auto p = std::get_if<::MouseMoveAbsolute>(&ev)) {
+                    data->type = "mouse_move_absolute";
+                    data->x = p->x; data->y = p->y;
+                } else if (auto p = std::get_if<::MouseClick>(&ev)) {
+                    data->type = "mouse_click";
+                    data->button = p->button; data->down = p->down;
+                } else if (auto p = std::get_if<::KeyPress>(&ev)) {
+                    data->type = "key_press";
+                    data->keyCode = p->keyCode; data->down = p->down;
+                } else if (auto p = std::get_if<::MouseScroll>(&ev)) {
+                    data->type = "mouse_scroll";
+                    data->delta = p->delta;
+                } else if (auto p = std::get_if<::TypeCharacter>(&ev)) {
+                    data->type = "type_character";
+                    data->charCode = p->charCode;
+                }
+
+                napi_status status = m_inputTsfn.BlockingCall(data, [](Napi::Env env, Napi::Function jsCallback, InputEventData* data) {
+                    Napi::Object ev = Napi::Object::New(env);
+                    ev.Set("type", data->type);
+                    if (data->type == "mouse_move_relative" || data->type == "mouse_move_absolute") {
+                        ev.Set("x", Napi::Number::New(env, data->x));
+                        ev.Set("y", Napi::Number::New(env, data->y));
+                    } else if (data->type == "mouse_click") {
+                        ev.Set("button", Napi::Number::New(env, data->button));
+                        ev.Set("down", Napi::Boolean::New(env, data->down));
+                    } else if (data->type == "key_press") {
+                        ev.Set("keyCode", Napi::Number::New(env, data->keyCode));
+                        ev.Set("down", Napi::Boolean::New(env, data->down));
+                    } else if (data->type == "mouse_scroll") {
+                        ev.Set("delta", Napi::Number::New(env, data->delta));
+                    } else if (data->type == "type_character") {
+                        ev.Set("charCode", Napi::Number::New(env, data->charCode));
+                    }
+                    jsCallback.Call({ ev });
+                    delete data;
+                });
+
+                if (status != napi_ok) {
+                    delete data;
+                }
+            });
+        }
+
+        return info.Env().Undefined();
+    }
+
+    Napi::Value OffInput(const Napi::CallbackInfo& info) {
+        if (m_queue.GetPlatform()) {
+            m_queue.GetPlatform()->SetInputEventCallback({});
+        }
+        if (m_inputTsfn) {
+            m_inputTsfn.Release();
+            m_inputTsfn = Napi::ThreadSafeFunction();
         }
         return info.Env().Undefined();
     }

@@ -19,6 +19,25 @@ export interface ClipboardEvent {
     data: string | string[];
 }
 
+export type InputEventType =
+    | 'mouse_move_relative'
+    | 'mouse_move_absolute'
+    | 'mouse_click'
+    | 'key_press'
+    | 'mouse_scroll'
+    | 'type_character';
+
+export interface InputEvent {
+    type: InputEventType;
+    x?: number;
+    y?: number;
+    button?: number;
+    down?: boolean;
+    keyCode?: number;
+    charCode?: number;
+    delta?: number;
+}
+
 /**
  * Interface representing the native input bridge for simulating hardware events.
  * Actions are queued and must be dispatched using `flush()`.
@@ -338,6 +357,17 @@ export interface IInputBridge {
     offClipboard(): void;
 
     /**
+     * Registers a callback to receive pushed input events (keyboard/mouse) from the platform.
+     * The callback receives an `InputEvent` object describing the event.
+     */
+    onInput(callback: (event: InputEvent) => void): void;
+
+    /**
+     * Removes the registered input event listener.
+     */
+    offInput(): void;
+
+    /**
      * Simulates a hardware key press using a standard `KeyboardEvent.code` string, 
      * acting as a universal Plug-and-Play mechanism.
      * 
@@ -494,6 +524,14 @@ export class InputBridge implements IInputBridge {
         this.nativeBridge.offClipboard();
     }
 
+    onInput(callback: (event: InputEvent) => void): void {
+        this.nativeBridge.onInput(callback as any);
+    }
+
+    offInput(): void {
+        this.nativeBridge.offInput();
+    }
+
     keyPressDOM(domCode: string, down: boolean): boolean {
         const rawCode = mapDomCodeToNativeTarget(domCode);
         if (rawCode !== null) {
@@ -527,6 +565,7 @@ export class InputBridge implements IInputBridge {
     getClipboardFilesRemote(): string[] | null {
         return this.nativeBridge.getClipboardFilesRemote();
     }
+    
 }
 
 export default { InputBridge };

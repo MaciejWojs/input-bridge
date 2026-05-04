@@ -85,6 +85,16 @@ class IPlatformInput {
         (void)cb;
     }
 
+    using InputEventCallback = std::function<void(const InputEvent& ev)>;
+    /**
+     * Sets a callback that will be invoked for incoming input events (push)
+     * coming from the platform (e.g. captured keyboard/mouse events).
+     * Default implementation is a no-op.
+     */
+    virtual void SetInputEventCallback(InputEventCallback cb) {
+        (void)cb;
+    }
+
     void SetLogCallback(std::function<void(const std::string&)> cb) {
         m_log = cb;
     }
