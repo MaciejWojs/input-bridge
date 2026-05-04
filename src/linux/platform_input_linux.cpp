@@ -75,7 +75,8 @@ class PlatformInputLinux : public IPlatformInput {
             return false;
         }
 
-        if (m_eis.connected && m_eis.context && m_eis.device) {
+        if (HasEISDevice()) {
+            eis_connected.store(true, std::memory_order_relaxed);
             return true;
         }
 
@@ -192,6 +193,7 @@ class PlatformInputLinux : public IPlatformInput {
             return false;
         }
 
+        eis_connected.store(true, std::memory_order_relaxed);
         input_mode = InputMode::EIS;
         std::cout << "ConnectToEIS succeeded. EIS sender is ready." << std::endl;
         return true;
@@ -481,12 +483,14 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     bool HasEISDevice() const {
-        return m_eis.connected && m_eis.context != nullptr && m_eis.device != nullptr;
+        return m_eis.connected && m_eis.started && m_eis.context != nullptr && m_eis.device != nullptr;
     }
 
     void ReleaseEISState() {
         if (m_eis.device) {
-            ei_device_stop_emulating(m_eis.device);
+            if (m_eis.started) {
+                ei_device_stop_emulating(m_eis.device);
+            }
             ei_device_close(m_eis.device);
             ei_device_unref(m_eis.device);
             m_eis.device = nullptr;
@@ -504,6 +508,7 @@ class PlatformInputLinux : public IPlatformInput {
         m_eis.pending_disconnect = false;
         m_eis.seat_requested = false;
         m_eis.started = false;
+        eis_connected.store(false, std::memory_order_relaxed);
     }
 
     void EISDispatchPending() {
@@ -543,21 +548,10 @@ class PlatformInputLinux : public IPlatformInput {
                                     EI_DEVICE_CAP_BUTTON,
                                     EI_DEVICE_CAP_KEYBOARD,
                                     EI_DEVICE_CAP_SCROLL,
-                                    EI_DEVICE_CAP_TEXT,
                                     NULL
                                 );
-                                ei_seat_request_device_with_capabilities(
-                                    m_eis.seat,
-                                    EI_DEVICE_CAP_POINTER,
-                                    EI_DEVICE_CAP_POINTER_ABSOLUTE,
-                                    EI_DEVICE_CAP_BUTTON,
-                                    EI_DEVICE_CAP_KEYBOARD,
-                                    EI_DEVICE_CAP_SCROLL,
-                                    EI_DEVICE_CAP_TEXT,
-                                    NULL
-                                );
-                                m_eis.seat_requested = true;
                             }
+                            m_eis.seat_requested = true;
                         }
                         break;
                     }
@@ -566,15 +560,28 @@ class PlatformInputLinux : public IPlatformInput {
                             m_eis.device = ei_event_get_device(event);
                             if (m_eis.device) {
                                 ei_device_ref(m_eis.device);
-                                if (!m_eis.started) {
-                                    if (m_eis.sequence == 0) {
-                                        m_eis.sequence = 1;
-                                    }
-                                    ei_device_start_emulating(m_eis.device, m_eis.sequence++);
-                                    m_eis.started = true;
-                                }
                                 m_eis.connected = true;
                             }
+                        }
+                        break;
+                    }
+                    case EI_EVENT_DEVICE_RESUMED: {
+                        if (m_eis.device && !m_eis.started) {
+                            if (m_eis.sequence == 0) {
+                                m_eis.sequence = 1;
+                            }
+                            ei_device_start_emulating(m_eis.device, m_eis.sequence++);
+                            m_eis.started = true;
+                            m_eis.connected = true;
+                            eis_connected.store(true, std::memory_order_relaxed);
+                        }
+                        break;
+                    }
+                    case EI_EVENT_DEVICE_PAUSED: {
+                        if (m_eis.device && m_eis.started) {
+                            ei_device_stop_emulating(m_eis.device);
+                            m_eis.started = false;
+                            eis_connected.store(false, std::memory_order_relaxed);
                         }
                         break;
                     }
@@ -655,22 +662,7 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     bool SendEISText(uint32_t codepoint) {
-        if (!HasEISDevice()) {
-            return false;
-        }
-        if (!ei_device_has_capability(m_eis.device, EI_DEVICE_CAP_TEXT)) {
-            return false;
-        }
-
-        const std::string utf8 = EncodeUTF8(codepoint);
-        if (utf8.empty()) {
-            return false;
-        }
-
-        ei_device_text_utf8(m_eis.device, utf8.c_str());
-        EISDispatchPending();
-        EISFrame();
-        return true;
+        return false;
     }
 
     void SendEISUnicodeFallback(uint32_t codepoint) {
@@ -1660,9 +1652,7 @@ class PlatformInputLinux : public IPlatformInput {
         if (eis_connected.load(std::memory_order_relaxed)) {
             EISDispatchPending();
             if (HasEISDevice()) {
-                if (SendEISText(charCode)) {
-                    return;
-                }
+
                 SendEISUnicodeFallback(charCode);
                 return;
             }
