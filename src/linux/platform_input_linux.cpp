@@ -253,6 +253,8 @@ class PlatformInputLinux : public IPlatformInput {
     std::string session_handle;
     std::atomic<bool> is_session_ready = false;
     bool m_batchMode = false;
+    std::vector<MonitorInfo> m_monitors;
+    int32_t m_currentMonitorIndex = 0;
 
     GMainContext* dbus_context = nullptr;
     GMainLoop* main_loop = nullptr;
@@ -266,6 +268,32 @@ class PlatformInputLinux : public IPlatformInput {
     std::string GetSessionHandle() {
         std::lock_guard<std::mutex> lock(session_mutex);
         return session_handle;
+    }
+
+    static MonitorInfo BuildDefaultMonitor() {
+        MonitorInfo monitor;
+        monitor.index = 0;
+        monitor.id = "portal-default";
+        monitor.name = "Portal Desktop";
+        monitor.x = 0;
+        monitor.y = 0;
+        monitor.width = 0;
+        monitor.height = 0;
+        monitor.primary = true;
+        return monitor;
+    }
+
+    const MonitorInfo& GetCurrentMonitor() const {
+        if (m_monitors.empty()) {
+            static MonitorInfo fallback = BuildDefaultMonitor();
+            return fallback;
+        }
+
+        if (m_currentMonitorIndex < 0 || static_cast<size_t>(m_currentMonitorIndex) >= m_monitors.size()) {
+            return m_monitors.front();
+        }
+
+        return m_monitors[static_cast<size_t>(m_currentMonitorIndex)];
     }
 
     static bool SendKeyboardKeycode(GDBusConnection* connection, const std::string& handle, uint32_t evdev, bool down) {
@@ -784,6 +812,7 @@ class PlatformInputLinux : public IPlatformInput {
 
     PlatformInputLinux() {
         // This object will initialize the session via Async Init
+        m_monitors.push_back(BuildDefaultMonitor());
     }
 
     ~PlatformInputLinux() {
@@ -861,6 +890,10 @@ class PlatformInputLinux : public IPlatformInput {
     void MoveMouseAbsolute(int32_t x, int32_t y) override {
         if (!is_session_ready) return;
 
+        const MonitorInfo& monitor = GetCurrentMonitor();
+        const double absoluteX = static_cast<double>(monitor.x + x);
+        const double absoluteY = static_cast<double>(monitor.y + y);
+
         const std::string session_handle = GetSessionHandle();
         GVariantBuilder options_builder;
         g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
@@ -873,7 +906,7 @@ class PlatformInputLinux : public IPlatformInput {
                 "/org/freedesktop/portal/desktop",
                 "org.freedesktop.portal.RemoteDesktop",
                 "NotifyPointerMotionAbsolute",
-                g_variant_new("(o@a{sv}udd)", session_handle.c_str(), g_variant_builder_end(&options_builder), 0, (double)x, (double)y),
+                g_variant_new("(o@a{sv}udd)", session_handle.c_str(), g_variant_builder_end(&options_builder), 0, absoluteX, absoluteY),
                 nullptr,
                 G_DBUS_CALL_FLAGS_NONE,
                 -1,
@@ -898,7 +931,7 @@ class PlatformInputLinux : public IPlatformInput {
             "/org/freedesktop/portal/desktop",
             "org.freedesktop.portal.RemoteDesktop",
             "NotifyPointerMotionAbsolute",
-            g_variant_new("(o@a{sv}udd)", session_handle.c_str(), g_variant_builder_end(&options_builder), 0, (double)x, (double)y),
+            g_variant_new("(o@a{sv}udd)", session_handle.c_str(), g_variant_builder_end(&options_builder), 0, absoluteX, absoluteY),
             nullptr,
             G_DBUS_CALL_FLAGS_NONE,
             -1,
@@ -906,6 +939,19 @@ class PlatformInputLinux : public IPlatformInput {
             nullptr,
             nullptr
         );
+    }
+
+    std::vector<MonitorInfo> GetMonitors() override {
+        return m_monitors;
+    }
+
+    bool SetCurrentMonitor(int32_t monitorIndex) override {
+        if (monitorIndex < 0 || static_cast<size_t>(monitorIndex) >= m_monitors.size()) {
+            return false;
+        }
+
+        m_currentMonitorIndex = monitorIndex;
+        return true;
     }
 
     void MouseClick(int32_t button, bool down) override {

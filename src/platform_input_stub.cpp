@@ -27,6 +27,14 @@ class PlatformInputStub : public IPlatformInput {
         return std::nullopt;
     }
 
+    std::vector<MonitorInfo> GetMonitors() override {
+        return {};
+    }
+
+    bool SetCurrentMonitor(int32_t) override {
+        return false;
+    }
+
     void MoveMouseRelative(int32_t x, int32_t y) override {
         // NotImplemented
     }
