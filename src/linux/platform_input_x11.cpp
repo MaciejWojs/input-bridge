@@ -367,7 +367,7 @@ class X11PlatformInput : public IPlatformInput {
     }
 
     void MoveMouseAbsolute(int32_t x, int32_t y) override {
-        XTestFakeMotionEvent(m_display, -1, x, y, CurrentTime);
+        XTestFakeMotionEvent(m_display, 0, x, y, CurrentTime);
     }
 
     void MoveMouseRelative(int32_t x, int32_t y) override {

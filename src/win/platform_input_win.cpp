@@ -509,9 +509,18 @@ class PlatformInputWin : public IPlatformInput {
 
         INPUT input = { 0 };
         input.type = INPUT_MOUSE;
-        input.mi.dx = (x * 65535) / (GetSystemMetrics(SM_CXSCREEN) - 1);
-        input.mi.dy = (y * 65535) / (GetSystemMetrics(SM_CYSCREEN) - 1);
-        input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+
+        int virtLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        int virtTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        int virtScreenWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        int virtScreenHeight = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+        if (virtScreenWidth <= 0) virtScreenWidth = GetSystemMetrics(SM_CXSCREEN);
+        if (virtScreenHeight <= 0) virtScreenHeight = GetSystemMetrics(SM_CYSCREEN);
+
+        input.mi.dx = ((x - virtLeft) * 65535) / (virtScreenWidth - 1);
+        input.mi.dy = ((y - virtTop) * 65535) / (virtScreenHeight - 1);
+        input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
         SendInput(1, &input, sizeof(INPUT));
     }
 
