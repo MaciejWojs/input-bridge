@@ -1476,7 +1476,7 @@ class PlatformInputLinux : public IPlatformInput {
         int32_t localX = x;
         int32_t localY = y;
 
-        // Ograniczamy współrzędne do granic monitora, jeśli jego wymiary są znane
+        // 1. Ograniczamy współrzędne do granic wybranego monitora
         if (monitor.width > 0) {
             localX = std::max(0, std::min(localX, monitor.width - 1));
         }
@@ -1484,8 +1484,34 @@ class PlatformInputLinux : public IPlatformInput {
             localY = std::max(0, std::min(localY, monitor.height - 1));
         }
 
-        const double absoluteX = static_cast<double>(monitor.x + localX);
-        const double absoluteY = static_cast<double>(monitor.y + localY);
+        // 2. Wyznaczamy globalne współrzędne w pikselach względem wirtualnego pulpitu
+        const int32_t globalX = monitor.x + localX;
+        const int32_t globalY = monitor.y + localY;
+
+        // 3. Obliczamy granice całego wirtualnego pulpitu (wszystkich monitorów) do normalizacji
+        int32_t minX = 0, minY = 0, maxX = 0, maxY = 0;
+        if (!m_monitors.empty()) {
+            minX = m_monitors[0].x;
+            minY = m_monitors[0].y;
+            maxX = m_monitors[0].x + m_monitors[0].width;
+            maxY = m_monitors[0].y + m_monitors[0].height;
+
+            for (const auto& m : m_monitors) {
+                minX = std::min(minX, m.x);
+                minY = std::min(minY, m.y);
+                maxX = std::max(maxX, m.x + m.width);
+                maxY = std::max(maxY, m.y + m.height);
+            }
+        }
+
+        int32_t virtWidth = maxX - minX;
+        int32_t virtHeight = maxY - minY;
+        if (virtWidth <= 1) virtWidth = 1920; 
+        if (virtHeight <= 1) virtHeight = 1080;
+
+        // 4. Normalizujemy do zakresu [0.0, 1.0] wymaganego przez portal RemoteDesktop
+        const double normX = std::clamp(static_cast<double>(globalX - minX) / static_cast<double>(virtWidth - 1), 0.0, 1.0);
+        const double normY = std::clamp(static_cast<double>(globalY - minY) / static_cast<double>(virtHeight - 1), 0.0, 1.0);
 
         const std::string session_handle = GetSessionHandle();
         GVariantBuilder options_builder;
@@ -1499,7 +1525,7 @@ class PlatformInputLinux : public IPlatformInput {
                 "/org/freedesktop/portal/desktop",
                 "org.freedesktop.portal.RemoteDesktop",
                 "NotifyPointerMotionAbsolute",
-                g_variant_new("(o@a{sv}udd)", session_handle.c_str(), g_variant_builder_end(&options_builder), 0, absoluteX, absoluteY),
+                g_variant_new("(o@a{sv}udd)", session_handle.c_str(), g_variant_builder_end(&options_builder), 0, normX, normY),
                 nullptr,
                 G_DBUS_CALL_FLAGS_NONE,
                 -1,
@@ -1524,7 +1550,7 @@ class PlatformInputLinux : public IPlatformInput {
             "/org/freedesktop/portal/desktop",
             "org.freedesktop.portal.RemoteDesktop",
             "NotifyPointerMotionAbsolute",
-            g_variant_new("(o@a{sv}udd)", session_handle.c_str(), g_variant_builder_end(&options_builder), 0, absoluteX, absoluteY),
+            g_variant_new("(o@a{sv}udd)", session_handle.c_str(), g_variant_builder_end(&options_builder), 0, normX, normY),
             nullptr,
             G_DBUS_CALL_FLAGS_NONE,
             -1,
