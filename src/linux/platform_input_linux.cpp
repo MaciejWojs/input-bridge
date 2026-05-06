@@ -34,6 +34,7 @@
 #  define INPUT_BRIDGE_HAS_LIBEI 0
 #endif
 
+#include <algorithm>
 
 class PlatformInputLinux : public IPlatformInput {
 
@@ -1471,8 +1472,20 @@ class PlatformInputLinux : public IPlatformInput {
 #endif
 
         const MonitorInfo& monitor = GetCurrentMonitor();
-        const double absoluteX = static_cast<double>(monitor.x + x);
-        const double absoluteY = static_cast<double>(monitor.y + y);
+
+        int32_t localX = x;
+        int32_t localY = y;
+
+        // Ograniczamy współrzędne do granic monitora, jeśli jego wymiary są znane
+        if (monitor.width > 0) {
+            localX = std::max(0, std::min(localX, monitor.width - 1));
+        }
+        if (monitor.height > 0) {
+            localY = std::max(0, std::min(localY, monitor.height - 1));
+        }
+
+        const double absoluteX = static_cast<double>(monitor.x + localX);
+        const double absoluteY = static_cast<double>(monitor.y + localY);
 
         const std::string session_handle = GetSessionHandle();
         GVariantBuilder options_builder;
