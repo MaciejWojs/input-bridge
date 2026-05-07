@@ -8,15 +8,15 @@ const __dirname = path.dirname(__filename);
 export type ClipboardEventType = 'text' | 'files';
 
 /**
- * Describes a monitor exposed by the native backend.
+ * Basic monitor metadata structure used for setting monitors manually.
  */
-export interface MonitorInfo {
-    /** Stable session index used with `setCurrentMonitor()`. */
-    index: number;
+export interface MonitorMetadata {
     /** Native monitor identifier or output name. */
     id: string;
     /** Human-readable monitor name. */
     name: string;
+    /** Stable session index used with `setCurrentMonitor()`. */
+    index: number;
     /** Left edge in virtual desktop coordinates. */
     x: number;
     /** Top edge in virtual desktop coordinates. */
@@ -25,6 +25,14 @@ export interface MonitorInfo {
     width: number;
     /** Monitor height in pixels. */
     height: number;
+    /** Whether this is the primary/default monitor. */
+    primary?: boolean;
+}
+
+/**
+ * Describes a monitor exposed by the native backend.
+ */
+export interface MonitorInfo extends MonitorMetadata {
     /** Whether this is the primary/default monitor. */
     primary: boolean;
 }
@@ -196,7 +204,7 @@ export interface IInputBridge {
      * 
      * @param monitors - Array of monitor info objects.
      */
-    setMonitors(monitors: MonitorInfo[]): void;
+    setMonitors(monitors: MonitorMetadata[]): void;
 
     /**
      * Selects the active monitor used by `moveMouseAbsolute(x, y)`.
@@ -688,7 +696,7 @@ export class InputBridge implements IInputBridge {
         return this.nativeBridge.getMonitors();
     }
 
-    setMonitors(monitors: MonitorInfo[]): void {
+    setMonitors(monitors: MonitorMetadata[]): void {
         this.nativeBridge.setMonitors(monitors);
     }
 
