@@ -813,6 +813,7 @@ class PlatformInputLinux : public IPlatformInput {
     std::string session_handle;
     std::atomic<bool> is_session_ready = false;
     bool m_batchMode = false;
+    std::mutex m_monitorMutex;
     std::vector<MonitorInfo> m_monitors;
     int32_t m_currentMonitorIndex = 0;
 
@@ -844,6 +845,7 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     const MonitorInfo& GetCurrentMonitor() const {
+        // Note: m_monitorMutex should be held by caller or this should return a copy
         if (m_monitors.empty()) {
             static MonitorInfo fallback = BuildDefaultMonitor();
             return fallback;
@@ -1468,48 +1470,54 @@ class PlatformInputLinux : public IPlatformInput {
     void MoveMouseAbsolute(int32_t x, int32_t y) override {
         if (!is_session_ready) return;
 
-        const MonitorInfo& monitor = GetCurrentMonitor();
+        double normX = 0.0;
+        double normY = 0.0;
 
-        int32_t localX = x;
-        int32_t localY = y;
+        {
+            std::lock_guard<std::mutex> lock(m_monitorMutex);
+            const MonitorInfo& monitor = GetCurrentMonitor();
 
-        // 1. Ograniczamy współrzędne do granic wybranego monitora
-        if (monitor.width > 0) {
-            localX = std::max(0, std::min(localX, monitor.width - 1));
-        }
-        if (monitor.height > 0) {
-            localY = std::max(0, std::min(localY, monitor.height - 1));
-        }
+            int32_t localX = x;
+            int32_t localY = y;
 
-        // 2. Determine global coordinates in pixels relative to virtual desktop
-        const int32_t globalX = monitor.x + localX;
-        const int32_t globalY = monitor.y + localY;
-
-        // 3. Calculate boundaries of the entire virtual desktop for normalization
-        int32_t minX = 0, minY = 0, maxX = 0, maxY = 0;
-        if (!m_monitors.empty()) {
-            minX = m_monitors[0].x;
-            minY = m_monitors[0].y;
-            maxX = m_monitors[0].x + m_monitors[0].width;
-            maxY = m_monitors[0].y + m_monitors[0].height;
-
-            for (const auto& m : m_monitors) {
-                minX = std::min(minX, m.x);
-                minY = std::min(minY, m.y);
-                maxX = std::max(maxX, m.x + m.width);
-                maxY = std::max(maxY, m.y + m.height);
+            // 1. Clamp coordinates to selected monitor bounds
+            if (monitor.width > 0) {
+                localX = std::max(0, std::min(localX, monitor.width - 1));
             }
+            if (monitor.height > 0) {
+                localY = std::max(0, std::min(localY, monitor.height - 1));
+            }
+
+            // 2. Determine global coordinates relative to virtual desktop
+            const int32_t globalX = monitor.x + localX;
+            const int32_t globalY = monitor.y + localY;
+
+            // 3. Calculate virtual desktop boundaries for normalization
+            int32_t minX = 0, minY = 0, maxX = 0, maxY = 0;
+            if (!m_monitors.empty()) {
+                minX = m_monitors[0].x;
+                minY = m_monitors[0].y;
+                maxX = m_monitors[0].x + m_monitors[0].width;
+                maxY = m_monitors[0].y + m_monitors[0].height;
+
+                for (const auto& m : m_monitors) {
+                    minX = std::min(minX, m.x);
+                    minY = std::min(minY, m.y);
+                    maxX = std::max(maxX, m.x + m.width);
+                    maxY = std::max(maxY, m.y + m.height);
+                }
+            }
+
+            int32_t virtWidth = maxX - minX;
+            int32_t virtHeight = maxY - minY;
+            if (virtWidth <= 1) virtWidth = 1920; 
+            if (virtHeight <= 1) virtHeight = 1080;
+
+            // 4. Normalize to [0.0, 1.0] range targeting pixel centers.
+            // We use a strict upper bound of 0.9999 to prevent "Invalid position" on some compositors.
+            normX = std::clamp((static_cast<double>(globalX - minX) + 0.5) / static_cast<double>(virtWidth), 0.0, 0.99999);
+            normY = std::clamp((static_cast<double>(globalY - minY) + 0.5) / static_cast<double>(virtHeight), 0.0, 0.99999);
         }
-
-        int32_t virtWidth = maxX - minX;
-        int32_t virtHeight = maxY - minY;
-        if (virtWidth <= 1) virtWidth = 1920; 
-        if (virtHeight <= 1) virtHeight = 1080;
-
-        // 4. Normalize to [0.0, 1.0] range required by the RemoteDesktop portal.
-        // We use the full width/height as divisor to ensure the last pixel stays safely within bounds.
-        const double normX = std::clamp(static_cast<double>(globalX - minX) / static_cast<double>(virtWidth), 0.0, 1.0);
-        const double normY = std::clamp(static_cast<double>(globalY - minY) / static_cast<double>(virtHeight), 0.0, 1.0);
 
 #if INPUT_BRIDGE_HAS_LIBEI
         if (eis_connected.load(std::memory_order_relaxed)) {
@@ -1533,7 +1541,7 @@ class PlatformInputLinux : public IPlatformInput {
                 "/org/freedesktop/portal/desktop",
                 "org.freedesktop.portal.RemoteDesktop",
                 "NotifyPointerMotionAbsolute",
-                g_variant_new("(o@a{sv}udd)", session_handle.c_str(), g_variant_builder_end(&options_builder), 0, normX, normY),
+                g_variant_new("(o@a{sv}udd)", session_handle.c_str(), g_variant_builder_end(&options_builder), (guint32)0, normX, normY),
                 nullptr,
                 G_DBUS_CALL_FLAGS_NONE,
                 -1,
@@ -1558,7 +1566,7 @@ class PlatformInputLinux : public IPlatformInput {
             "/org/freedesktop/portal/desktop",
             "org.freedesktop.portal.RemoteDesktop",
             "NotifyPointerMotionAbsolute",
-            g_variant_new("(o@a{sv}udd)", session_handle.c_str(), g_variant_builder_end(&options_builder), 0, normX, normY),
+            g_variant_new("(o@a{sv}udd)", session_handle.c_str(), g_variant_builder_end(&options_builder), (guint32)0, normX, normY),
             nullptr,
             G_DBUS_CALL_FLAGS_NONE,
             -1,
@@ -1569,14 +1577,24 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     std::vector<MonitorInfo> GetMonitors() override {
+        std::lock_guard<std::mutex> lock(m_monitorMutex);
         return m_monitors;
     }
 
     void SetMonitors(const std::vector<MonitorInfo>& monitors) override {
-        m_monitors = monitors;
+        {
+           std::lock_guard<std::mutex> lock(m_monitorMutex);
+           m_monitors = monitors;
+        }
+
+        std::cout << "Monitors updated. Current monitors:" << std::endl;
+        for (const auto& m : monitors) {
+            std::cout << "  [" << m.index << "] " << m.name << " (id: " << m.id << ") at (" << m.x << "," << m.y << ") " << m.width << "x" << m.height << (m.primary ? " [PRIMARY]" : "") << std::endl;
+        }
     }
 
     bool SetCurrentMonitor(int32_t monitorIndex) override {
+        std::lock_guard<std::mutex> lock(m_monitorMutex);
         if (monitorIndex < 0 || static_cast<size_t>(monitorIndex) >= m_monitors.size()) {
             return false;
         }
