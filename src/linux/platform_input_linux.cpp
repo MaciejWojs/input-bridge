@@ -20,18 +20,24 @@
 #include <dlfcn.h>
 #include <poll.h>
 
-#if defined(__has_include)
-#  if __has_include(<libei.h>)
-#    include <libei.h>
-#    define INPUT_BRIDGE_HAS_LIBEI 1
-#  elif __has_include(<libei/libei.h>)
-#    include <libei/libei.h>
-#    define INPUT_BRIDGE_HAS_LIBEI 1
+#if defined(INPUT_BRIDGE_DISABLE_LIBEI)
+#pragma message(">>> COMPILING WITH DISABLED LIBEI SUPPORT<<<")
+#warning "LIBEI support disabled"
+#  define INPUT_BRIDGE_HAS_LIBEI 0
+#else
+#  if defined(__has_include)
+#    if __has_include(<libei.h>)
+#      include <libei.h>
+#      define INPUT_BRIDGE_HAS_LIBEI 1
+#    elif __has_include(<libei/libei.h>)
+#      include <libei/libei.h>
+#      define INPUT_BRIDGE_HAS_LIBEI 1
+#    else
+#      define INPUT_BRIDGE_HAS_LIBEI 0
+#    endif
 #  else
 #    define INPUT_BRIDGE_HAS_LIBEI 0
 #  endif
-#else
-#  define INPUT_BRIDGE_HAS_LIBEI 0
 #endif
 
 #include <algorithm>
