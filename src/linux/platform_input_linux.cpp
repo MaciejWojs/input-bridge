@@ -1493,7 +1493,7 @@ class PlatformInputLinux : public IPlatformInput {
             const int32_t globalY = monitor.y + localY;
 
             // 3. Calculate virtual desktop boundaries for normalization
-            int32_t minX = 0, minY = 0, maxX = 0, maxY = 0;
+            int32_t minX = 0, minY = 0, maxX = 0, maxY = 0, virtWidth = 1920, virtHeight = 1080;
             if (!m_monitors.empty()) {
                 minX = m_monitors[0].x;
                 minY = m_monitors[0].y;
@@ -1506,17 +1506,15 @@ class PlatformInputLinux : public IPlatformInput {
                     maxX = std::max(maxX, m.x + m.width);
                     maxY = std::max(maxY, m.y + m.height);
                 }
+                virtWidth = std::max(1, maxX - minX);
+                virtHeight = std::max(1, maxY - minY);
             }
 
-            int32_t virtWidth = maxX - minX;
-            int32_t virtHeight = maxY - minY;
-            if (virtWidth <= 1) virtWidth = 1920; 
-            if (virtHeight <= 1) virtHeight = 1080;
-
-            // 4. Normalize to [0.0, 1.0] range targeting pixel centers.
-            // We use a strict upper bound of 0.9999 to prevent "Invalid position" on some compositors.
-            normX = std::clamp((static_cast<double>(globalX - minX) + 0.5) / static_cast<double>(virtWidth), 0.0, 0.99999);
-            normY = std::clamp((static_cast<double>(globalY - minY) + 0.5) / static_cast<double>(virtHeight), 0.0, 0.99999);
+            // 4. Normalize to [0.0, 1.0) range.
+            // Using pixel-edge mapping and a conservative clamp to 0.9999 prevents 
+            // "Invalid position" errors on compositors with strict boundary checks.
+            normX = std::clamp(static_cast<double>(globalX - minX) / static_cast<double>(virtWidth), 0.0, 0.9999);
+            normY = std::clamp(static_cast<double>(globalY - minY) / static_cast<double>(virtHeight), 0.0, 0.9999);
         }
 
 #if INPUT_BRIDGE_HAS_LIBEI
@@ -1550,7 +1548,11 @@ class PlatformInputLinux : public IPlatformInput {
             );
 
             if (error) {
-                std::cerr << "Failed to send NotifyPointerMotionAbsolute: " << error->message << std::endl;
+                std::lock_guard<std::mutex> lock(m_monitorMutex);
+                int32_t vw = (m_monitors.empty()) ? 1920 : (maxX - minX);
+                int32_t vh = (m_monitors.empty()) ? 1080 : (maxY - minY);
+                std::cerr << "Failed to send NotifyPointerMotionAbsolute: " << error->message 
+                          << " (norm: " << normX << "," << normY << " on " << vw << "x" << vh << ")" << std::endl;
                 g_error_free(error);
             }
 
