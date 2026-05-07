@@ -102,6 +102,8 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
             InstanceMethod("getClipboardFilesRemote", &InputBridge::GetClipboardFilesRemote),
             InstanceMethod("setInputMode", &InputBridge::SetInputMode),
             InstanceMethod("getInputMode", &InputBridge::GetInputMode),
+            InstanceMethod("setBackendMethods", &InputBridge::SetBackendMethods),
+            InstanceMethod("getBackendMethods", &InputBridge::GetBackendMethods),
             InstanceMethod("connectToEIS", &InputBridge::ConnectToEIS),
             InstanceMethod("disconnectEIS", &InputBridge::DisconnectEIS),
             InstanceMethod("isEISConnected", &InputBridge::IsEISConnected)
@@ -208,6 +210,71 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
 
     Napi::Value GetInputMode(const Napi::CallbackInfo& info) {
         return Napi::String::New(info.Env(), m_queue.GetPlatform()->GetInputMode());
+    }
+
+    Napi::Value SetBackendMethods(const Napi::CallbackInfo& info) {
+        if (info.Length() < 1 || !info[0].IsObject()) {
+            Napi::TypeError::New(info.Env(), "Expected options object").ThrowAsJavaScriptException();
+            return info.Env().Undefined();
+        }
+
+        Napi::Object options = info[0].As<Napi::Object>();
+        BackendMethods methods;
+
+        if (options.Has("keyboardMethod")) {
+            Napi::Value keyboardMethodValue = options.Get("keyboardMethod");
+            if (!keyboardMethodValue.IsString()) {
+                Napi::TypeError::New(info.Env(), "Expected keyboardMethod as 'eis' or 'fallback'").ThrowAsJavaScriptException();
+                return info.Env().Undefined();
+            }
+
+            const std::string keyboardMethod = keyboardMethodValue.As<Napi::String>().Utf8Value();
+            if (keyboardMethod == "eis") {
+                methods.keyboardMethod = KeyboardMethod::EIS;
+            } else if (keyboardMethod == "fallback") {
+                methods.keyboardMethod = KeyboardMethod::Fallback;
+            } else {
+                Napi::Error::New(info.Env(), "Unsupported keyboardMethod. Use 'eis' or 'fallback'.").ThrowAsJavaScriptException();
+                return info.Env().Undefined();
+            }
+        }
+
+        if (options.Has("allowNotifyKeyboard")) {
+            Napi::Value allowNotifyKeyboardValue = options.Get("allowNotifyKeyboard");
+            if (!allowNotifyKeyboardValue.IsBoolean()) {
+                Napi::TypeError::New(info.Env(), "Expected allowNotifyKeyboard as boolean").ThrowAsJavaScriptException();
+                return info.Env().Undefined();
+            }
+            methods.allowNotifyKeyboard = allowNotifyKeyboardValue.As<Napi::Boolean>().Value();
+        }
+
+        if (options.Has("allowNotifyPointer")) {
+            Napi::Value allowNotifyPointerValue = options.Get("allowNotifyPointer");
+            if (!allowNotifyPointerValue.IsBoolean()) {
+                Napi::TypeError::New(info.Env(), "Expected allowNotifyPointer as boolean").ThrowAsJavaScriptException();
+                return info.Env().Undefined();
+            }
+            methods.allowNotifyPointer = allowNotifyPointerValue.As<Napi::Boolean>().Value();
+        }
+
+        std::string error_msg;
+        bool ok = m_queue.GetPlatform()->SetBackendMethods(methods, error_msg);
+        if (!ok && !error_msg.empty()) {
+            Napi::Error::New(info.Env(), error_msg).ThrowAsJavaScriptException();
+            return info.Env().Undefined();
+        }
+
+        return Napi::Boolean::New(info.Env(), ok);
+    }
+
+    Napi::Value GetBackendMethods(const Napi::CallbackInfo& info) {
+        (void)info;
+        const BackendMethods methods = m_queue.GetPlatform()->GetBackendMethods();
+        Napi::Object options = Napi::Object::New(info.Env());
+        options.Set("keyboardMethod", methods.keyboardMethod == KeyboardMethod::EIS ? "eis" : "fallback");
+        options.Set("allowNotifyKeyboard", Napi::Boolean::New(info.Env(), methods.allowNotifyKeyboard));
+        options.Set("allowNotifyPointer", Napi::Boolean::New(info.Env(), methods.allowNotifyPointer));
+        return options;
     }
 
     Napi::Value ConnectToEIS(const Napi::CallbackInfo& info) {

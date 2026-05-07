@@ -6,6 +6,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 export type ClipboardEventType = 'text' | 'files';
+export type KeyboardMethod = 'eis' | 'fallback';
 
 /**
  * Basic monitor metadata structure used for setting monitors manually.
@@ -70,6 +71,22 @@ export interface InputEvent {
 }
 
 /**
+ * Configures how keyboard-oriented APIs are routed by the native backend.
+ *
+ * `keyboardMethod` controls the preferred transport for `keyPressDOM()` and `typeString()`:
+ * - `eis` keeps the EIS path preferred when available.
+ * - `fallback` keeps the portal/notify path preferred for Unicode and raw keyboard input.
+ *
+ * `allowNotifyKeyboard` and `allowNotifyPointer` control whether the backend may fall back to
+ * portal notify calls when EIS is unavailable or lacks the required capability.
+ */
+export interface BackendMethods {
+    keyboardMethod?: KeyboardMethod;
+    allowNotifyKeyboard?: boolean;
+    allowNotifyPointer?: boolean;
+}
+
+/**
  * Interface representing the native input bridge for simulating hardware events.
  * Actions are queued and must be dispatched using `flush()`.
  */
@@ -97,6 +114,21 @@ export interface IInputBridge {
      * Must be called after successful `init()`.
      */
     connectToEIS(): boolean;
+
+    /**
+     * Configures how the backend routes keyboard and pointer input when EIS is available.
+     *
+     * @param options - Backend routing options.
+     * @returns `true` if the configuration was accepted.
+     */
+    setBackendMethods(options: BackendMethods): boolean;
+
+    /**
+     * Returns the current backend routing configuration.
+     *
+     * @returns The active backend routing options.
+     */
+    getBackendMethods(): Required<BackendMethods>;
 
     /**
      * Closes active EIS connection and returns to notify mode.
@@ -559,6 +591,14 @@ export class InputBridge implements IInputBridge {
 
     connectToEIS(): boolean {
         return this.nativeBridge.connectToEIS();
+    }
+
+    setBackendMethods(options: BackendMethods): boolean {
+        return this.nativeBridge.setBackendMethods(options);
+    }
+
+    getBackendMethods(): Required<BackendMethods> {
+        return this.nativeBridge.getBackendMethods();
     }
 
     disconnectEIS(): void {

@@ -15,6 +15,17 @@ enum class InputRoute {
     Keyboard
 };
 
+enum class KeyboardMethod {
+    EIS,
+    Fallback
+};
+
+struct BackendMethods {
+    KeyboardMethod keyboardMethod = KeyboardMethod::EIS;
+    bool allowNotifyKeyboard = true;
+    bool allowNotifyPointer = true;
+};
+
 struct MouseMoveRelative { int32_t x; int32_t y; };
 struct MouseMoveAbsolute { int32_t x; int32_t y; };
 struct MouseClick { int32_t button; bool down; };
@@ -70,6 +81,16 @@ class IPlatformInput {
     virtual bool ConnectToEIS(std::string& error_msg) {
         error_msg = "EIS is not supported on this platform";
         return false;
+    }
+
+    virtual bool SetBackendMethods(const BackendMethods& methods, std::string& error_msg) {
+        (void)methods;
+        (void)error_msg;
+        return true;
+    }
+
+    virtual BackendMethods GetBackendMethods() const {
+        return {};
     }
 
     virtual void DisconnectEIS() {}

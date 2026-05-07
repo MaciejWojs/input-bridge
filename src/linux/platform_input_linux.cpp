@@ -49,7 +49,15 @@ class PlatformInputLinux : public IPlatformInput {
         EIS
     };
 
+    enum class KeyboardRouting {
+        EIS,
+        Fallback
+    };
+
     InputMode input_mode = InputMode::Notify;
+    KeyboardRouting keyboard_routing = KeyboardRouting::EIS;
+    bool allow_notify_keyboard = true;
+    bool allow_notify_pointer = true;
     int eis_fd = -1;
     std::atomic<bool> eis_connected{ false };
 
@@ -70,6 +78,24 @@ class PlatformInputLinux : public IPlatformInput {
 
     std::string GetInputMode() const override {
         return input_mode == InputMode::EIS ? "eis" : "notify";
+    }
+
+    bool SetBackendMethods(const BackendMethods& methods, std::string& error_msg) override {
+        (void)error_msg;
+        keyboard_routing = (methods.keyboardMethod == KeyboardMethod::Fallback)
+            ? KeyboardRouting::Fallback
+            : KeyboardRouting::EIS;
+        allow_notify_keyboard = methods.allowNotifyKeyboard;
+        allow_notify_pointer = methods.allowNotifyPointer;
+        return true;
+    }
+
+    BackendMethods GetBackendMethods() const override {
+        BackendMethods methods;
+        methods.keyboardMethod = keyboard_routing == KeyboardRouting::EIS ? KeyboardMethod::EIS : KeyboardMethod::Fallback;
+        methods.allowNotifyKeyboard = allow_notify_keyboard;
+        methods.allowNotifyPointer = allow_notify_pointer;
+        return methods;
     }
 
     bool ConnectToEIS(std::string& error_msg) override {
@@ -1448,8 +1474,17 @@ class PlatformInputLinux : public IPlatformInput {
                 SendEISRelativeMotion(static_cast<double>(x), static_cast<double>(y));
                 return;
             }
+            if (!allow_notify_pointer) {
+                Log("EIS pointer routing requested but notify fallback is disabled.");
+                return;
+            }
         }
 #endif
+
+        if (!allow_notify_pointer) {
+            Log("Pointer routing requested but notify fallback is disabled.");
+            return;
+        }
 
         const std::string session_handle = GetSessionHandle();
         GVariantBuilder options_builder;
@@ -1695,7 +1730,7 @@ class PlatformInputLinux : public IPlatformInput {
     void KeyPress(int32_t keyCode, bool down) override {
         if (!is_session_ready) return;
 #if INPUT_BRIDGE_HAS_LIBEI
-        if (eis_connected.load(std::memory_order_relaxed)) {
+        if (keyboard_routing == KeyboardRouting::EIS && eis_connected.load(std::memory_order_relaxed)) {
             EISDispatchPending();
             if (HasEISDevice()) {
                 uint32_t evdev_code = 0;
@@ -1717,10 +1752,18 @@ class PlatformInputLinux : public IPlatformInput {
                 if (SendEISKeycode(evdev_code, down)) {
                     return;
                 }
-                // else fall through to portal NotifyKeyboardKeycode fallback
+            }
+            if (!allow_notify_keyboard) {
+                Log("EIS keyboard routing requested but notify fallback is disabled.");
+                return;
             }
         }
 #endif
+
+        if (!allow_notify_keyboard) {
+            Log("Keyboard routing requested but notify fallback is disabled.");
+            return;
+        }
 
         const std::string session_handle = GetSessionHandle();
         GVariantBuilder options_builder;
@@ -1800,8 +1843,17 @@ class PlatformInputLinux : public IPlatformInput {
                 SendEISScroll(delta);
                 return;
             }
+            if (!allow_notify_pointer) {
+                Log("EIS pointer routing requested but notify fallback is disabled.");
+                return;
+            }
         }
 #endif
+
+        if (!allow_notify_pointer) {
+            Log("Pointer routing requested but notify fallback is disabled.");
+            return;
+        }
 
         const std::string session_handle = GetSessionHandle();
         GVariantBuilder options_builder;
@@ -1853,15 +1905,25 @@ class PlatformInputLinux : public IPlatformInput {
     void TypeCharacter(uint32_t charCode) override {
         if (!is_session_ready) return;
 #if INPUT_BRIDGE_HAS_LIBEI
-        if (eis_connected.load(std::memory_order_relaxed)) {
+        if (keyboard_routing == KeyboardRouting::EIS && eis_connected.load(std::memory_order_relaxed)) {
             EISDispatchPending();
             if (HasEISDevice()) {
-
-                SendEISUnicodeFallback(charCode);
-                return;
+                if (m_eis.has_keyboard) {
+                    SendEISUnicodeFallback(charCode);
+                    return;
+                }
+                if (!allow_notify_keyboard) {
+                    Log("EIS Unicode routing requested but keyboard capability is missing and notify fallback is disabled.");
+                    return;
+                }
             }
         }
 #endif
+
+        if (!allow_notify_keyboard) {
+            Log("Unicode routing requested but notify fallback is disabled.");
+            return;
+        }
 
         const std::string session_handle = GetSessionHandle();
         uint32_t codepoint = static_cast<uint32_t>(charCode);
