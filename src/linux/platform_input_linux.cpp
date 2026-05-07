@@ -816,6 +816,10 @@ class PlatformInputLinux : public IPlatformInput {
     std::mutex m_monitorMutex;
     std::vector<MonitorInfo> m_monitors;
     int32_t m_currentMonitorIndex = 0;
+    int32_t m_virtMinX = 0;
+    int32_t m_virtMinY = 0;
+    int32_t m_virtWidth = 1920;
+    int32_t m_virtHeight = 1080;
 
     GMainContext* dbus_context = nullptr;
     GMainLoop* main_loop = nullptr;
@@ -838,8 +842,8 @@ class PlatformInputLinux : public IPlatformInput {
         monitor.name = "Portal Desktop";
         monitor.x = 0;
         monitor.y = 0;
-        monitor.width = 0;
-        monitor.height = 0;
+        monitor.width = 1920;
+        monitor.height = 1080;
         monitor.primary = true;
         return monitor;
     }
@@ -856,6 +860,32 @@ class PlatformInputLinux : public IPlatformInput {
         }
 
         return m_monitors[static_cast<size_t>(m_currentMonitorIndex)];
+    }
+
+    void UpdateVirtualDesktopBounds() {
+        // Assumes m_monitorMutex is held by caller
+        if (m_monitors.empty()) {
+            m_virtMinX = 0; m_virtMinY = 0;
+            m_virtWidth = 1920; m_virtHeight = 1080;
+            return;
+        }
+
+        int32_t minX = m_monitors[0].x;
+        int32_t minY = m_monitors[0].y;
+        int32_t maxX = m_monitors[0].x + m_monitors[0].width;
+        int32_t maxY = m_monitors[0].y + m_monitors[0].height;
+
+        for (const auto& m : m_monitors) {
+            minX = std::min(minX, m.x);
+            minY = std::min(minY, m.y);
+            maxX = std::max(maxX, m.x + m.width);
+            maxY = std::max(maxY, m.y + m.height);
+        }
+
+        m_virtMinX = minX;
+        m_virtMinY = minY;
+        m_virtWidth = std::max(1, maxX - minX);
+        m_virtHeight = std::max(1, maxY - minY);
     }
 
     static bool SendKeyboardKeycode(GDBusConnection* connection, const std::string& handle, uint32_t evdev, bool down) {
@@ -1383,6 +1413,7 @@ class PlatformInputLinux : public IPlatformInput {
     PlatformInputLinux() {
         // This object will initialize the session via Async Init
         m_monitors.push_back(BuildDefaultMonitor());
+        UpdateVirtualDesktopBounds();
     }
 
     ~PlatformInputLinux() {
@@ -1492,29 +1523,11 @@ class PlatformInputLinux : public IPlatformInput {
             const int32_t globalX = monitor.x + localX;
             const int32_t globalY = monitor.y + localY;
 
-            // 3. Calculate virtual desktop boundaries for normalization
-            int32_t minX = 0, minY = 0, maxX = 0, maxY = 0, virtWidth = 1920, virtHeight = 1080;
-            if (!m_monitors.empty()) {
-                minX = m_monitors[0].x;
-                minY = m_monitors[0].y;
-                maxX = m_monitors[0].x + m_monitors[0].width;
-                maxY = m_monitors[0].y + m_monitors[0].height;
-
-                for (const auto& m : m_monitors) {
-                    minX = std::min(minX, m.x);
-                    minY = std::min(minY, m.y);
-                    maxX = std::max(maxX, m.x + m.width);
-                    maxY = std::max(maxY, m.y + m.height);
-                }
-                virtWidth = std::max(1, maxX - minX);
-                virtHeight = std::max(1, maxY - minY);
-            }
-
-            // 4. Normalize to [0.0, 1.0) range.
+            // 3. Normalize to [0.0, 1.0) range using pre-calculated virtual desktop bounds.
             // Using pixel-edge mapping and a conservative clamp to 0.9999 prevents 
             // "Invalid position" errors on compositors with strict boundary checks.
-            normX = std::clamp(static_cast<double>(globalX - minX) / static_cast<double>(virtWidth), 0.0, 0.9999);
-            normY = std::clamp(static_cast<double>(globalY - minY) / static_cast<double>(virtHeight), 0.0, 0.9999);
+            normX = std::clamp(static_cast<double>(globalX - m_virtMinX) / static_cast<double>(m_virtWidth), 0.0, 0.9999);
+            normY = std::clamp(static_cast<double>(globalY - m_virtMinY) / static_cast<double>(m_virtHeight), 0.0, 0.9999);
         }
 
 #if INPUT_BRIDGE_HAS_LIBEI
@@ -1549,10 +1562,8 @@ class PlatformInputLinux : public IPlatformInput {
 
             if (error) {
                 std::lock_guard<std::mutex> lock(m_monitorMutex);
-                int32_t vw = (m_monitors.empty()) ? 1920 : (maxX - minX);
-                int32_t vh = (m_monitors.empty()) ? 1080 : (maxY - minY);
                 std::cerr << "Failed to send NotifyPointerMotionAbsolute: " << error->message 
-                          << " (norm: " << normX << "," << normY << " on " << vw << "x" << vh << ")" << std::endl;
+                          << " (norm: " << normX << "," << normY << " on " << m_virtWidth << "x" << m_virtHeight << ")" << std::endl;
                 g_error_free(error);
             }
 
@@ -1587,11 +1598,13 @@ class PlatformInputLinux : public IPlatformInput {
         {
            std::lock_guard<std::mutex> lock(m_monitorMutex);
            m_monitors = monitors;
+           UpdateVirtualDesktopBounds();
         }
 
-        std::cout << "Monitors updated. Current monitors:" << std::endl;
+        std::cout << "Monitors updated. Virtual Desktop: " << m_virtWidth << "x" << m_virtHeight 
+                  << " starting at (" << m_virtMinX << "," << m_virtMinY << ")" << std::endl;
         for (const auto& m : monitors) {
-            std::cout << "  [" << m.index << "] " << m.name << " (id: " << m.id << ") at (" << m.x << "," << m.y << ") " << m.width << "x" << m.height << (m.primary ? " [PRIMARY]" : "") << std::endl;
+            std::cout << "  [" << m.index << "] " << m.name << " " << m.width << "x" << m.height << " at (" << m.x << "," << m.y << ")" << (m.primary ? " [PRIMARY]" : "") << std::endl;
         }
     }
 
