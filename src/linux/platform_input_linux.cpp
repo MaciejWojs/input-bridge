@@ -226,6 +226,8 @@ class PlatformInputLinux : public IPlatformInput {
     guint clipboard_signal_id = 0;
     ClipboardChangeCallback m_clipboardCallback;
     std::mutex clipboard_callback_mutex;
+    InputEventCallback m_inputCallback;
+    std::mutex input_callback_mutex;
 
     bool SetClipboardText(const std::string& text) override {
         if (!is_session_ready) return false;
@@ -437,6 +439,20 @@ class PlatformInputLinux : public IPlatformInput {
     void SetClipboardChangeCallback(ClipboardChangeCallback cb) override {
         std::lock_guard<std::mutex> lock(clipboard_callback_mutex);
         m_clipboardCallback = std::move(cb);
+    }
+
+    void SetInputEventCallback(InputEventCallback cb) override {
+        std::lock_guard<std::mutex> lock(input_callback_mutex);
+        m_inputCallback = std::move(cb);
+    }
+
+    void EmitInputEvent(const InputEvent& ev) {
+        InputEventCallback cb;
+        {
+            std::lock_guard<std::mutex> lock(input_callback_mutex);
+            cb = m_inputCallback;
+        }
+        if (cb) cb(ev);
     }
 
     void EmitClipboardChange(const std::string& type, const std::vector<std::string>& files, const std::string& text) {
