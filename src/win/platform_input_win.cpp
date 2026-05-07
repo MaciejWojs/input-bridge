@@ -6,6 +6,7 @@
 #include <shlobj.h>
 #include <objidl.h>
 #include <ole2.h>
+#include <algorithm>
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -107,6 +108,34 @@ static bool ReadFileToBytes(const std::wstring& filePath, std::vector<uint8_t>& 
     }
     CloseHandle(file);
     return ok;
+}
+
+namespace {
+
+    BOOL CALLBACK EnumWindowsMonitorProc(HMONITOR hMonitor, HDC, LPRECT, LPARAM data) {
+        auto* monitors = reinterpret_cast<std::vector<MonitorInfo>*>(data);
+        if (!monitors) return FALSE;
+
+        MONITORINFOEXW monitorInfo = {};
+        monitorInfo.cbSize = sizeof(monitorInfo);
+        if (!GetMonitorInfoW(hMonitor, &monitorInfo)) {
+            return TRUE;
+        }
+
+        MonitorInfo monitor;
+        monitor.index = static_cast<int32_t>(monitors->size());
+        monitor.id = WideToUtf8(monitorInfo.szDevice);
+        monitor.name = monitor.id;
+        monitor.x = monitorInfo.rcMonitor.left;
+        monitor.y = monitorInfo.rcMonitor.top;
+        monitor.width = monitorInfo.rcMonitor.right - monitorInfo.rcMonitor.left;
+        monitor.height = monitorInfo.rcMonitor.bottom - monitorInfo.rcMonitor.top;
+        monitor.primary = (monitorInfo.dwFlags & MONITORINFOF_PRIMARY) != 0;
+
+        monitors->push_back(std::move(monitor));
+        return TRUE;
+    }
+
 }
 
 class RemoteFileDataObject : public IDataObject {
@@ -311,6 +340,8 @@ class RemoteFileDataObject : public IDataObject {
 class PlatformInputWin : public IPlatformInput {
     private:
     std::vector<INPUT> m_winInputs;
+    std::vector<MonitorInfo> m_monitors;
+    int32_t m_currentMonitorIndex = 0;
     ClipboardChangeCallback m_clipboardCallback;
     std::thread m_clipboardThread;
     std::atomic<bool> m_clipboardThreadRunning{ false };
@@ -597,6 +628,20 @@ class PlatformInputWin : public IPlatformInput {
     PlatformInputWin() {
         // Reserve memory up front to prevent frequent allocations on every flush
         m_winInputs.reserve(1024);
+        RefreshMonitors();
+    }
+
+    std::vector<MonitorInfo> GetMonitors() override {
+        return m_monitors;
+    }
+
+    bool SetCurrentMonitor(int32_t monitorIndex) override {
+        if (monitorIndex < 0 || static_cast<size_t>(monitorIndex) >= m_monitors.size()) {
+            return false;
+        }
+
+        m_currentMonitorIndex = monitorIndex;
+        return true;
     }
 
     bool Initialize(std::string& error_msg) override {
@@ -629,14 +674,88 @@ class PlatformInputWin : public IPlatformInput {
         SendInput(1, &input, sizeof(INPUT));
     }
 
-    void MoveMouseAbsolute(int32_t x, int32_t y) override {
-        Log("PlatformInputWin: MoveMouseAbsolute x=" + std::to_string(x) + " y=" + std::to_string(y));
+    const MonitorInfo& GetCurrentMonitor() const {
+        if (m_monitors.empty()) {
+            static MonitorInfo fallbackMonitor{ 0, "default", "default", 0, 0, 1, 1, true };
+            return fallbackMonitor;
+        }
+
+        if (m_currentMonitorIndex < 0 || static_cast<size_t>(m_currentMonitorIndex) >= m_monitors.size()) {
+            return m_monitors.front();
+        }
+
+        return m_monitors[static_cast<size_t>(m_currentMonitorIndex)];
+    }
+
+    void RefreshMonitors() {
+        m_monitors.clear();
+        EnumDisplayMonitors(nullptr, nullptr, EnumWindowsMonitorProc, reinterpret_cast<LPARAM>(&m_monitors));
+
+        if (m_monitors.empty()) {
+            MonitorInfo fallback;
+            fallback.index = 0;
+            fallback.id = "default";
+            fallback.name = "default";
+            fallback.x = 0;
+            fallback.y = 0;
+            fallback.width = GetSystemMetrics(SM_CXSCREEN);
+            fallback.height = GetSystemMetrics(SM_CYSCREEN);
+            fallback.primary = true;
+            if (fallback.width <= 0) fallback.width = 1;
+            if (fallback.height <= 0) fallback.height = 1;
+            m_monitors.push_back(std::move(fallback));
+        }
+
+        for (size_t i = 0; i < m_monitors.size(); ++i) {
+            m_monitors[i].index = static_cast<int32_t>(i);
+        }
+
+        for (size_t i = 0; i < m_monitors.size(); ++i) {
+            if (m_monitors[i].primary) {
+                m_currentMonitorIndex = static_cast<int32_t>(i);
+                return;
+            }
+        }
+
+        m_currentMonitorIndex = 0;
+    }
+
+    INPUT BuildAbsoluteMouseInput(int32_t x, int32_t y) const {
+        const MonitorInfo& monitor = GetCurrentMonitor();
+
+        int32_t localX = x;
+        int32_t localY = y;
+        if (monitor.width > 0) {
+            localX = std::max(0, std::min(localX, monitor.width - 1));
+        }
+        if (monitor.height > 0) {
+            localY = std::max(0, std::min(localY, monitor.height - 1));
+        }
+
+        const int globalX = monitor.x + localX;
+        const int globalY = monitor.y + localY;
+
+        int virtLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        int virtTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        int virtScreenWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        int virtScreenHeight = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+        if (virtScreenWidth <= 0) virtScreenWidth = GetSystemMetrics(SM_CXSCREEN);
+        if (virtScreenHeight <= 0) virtScreenHeight = GetSystemMetrics(SM_CYSCREEN);
+        if (virtScreenWidth <= 1) virtScreenWidth = 2;
+        if (virtScreenHeight <= 1) virtScreenHeight = 2;
 
         INPUT input = { 0 };
         input.type = INPUT_MOUSE;
-        input.mi.dx = (x * 65535) / (GetSystemMetrics(SM_CXSCREEN) - 1);
-        input.mi.dy = (y * 65535) / (GetSystemMetrics(SM_CYSCREEN) - 1);
-        input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+        input.mi.dx = ((globalX - virtLeft) * 65535) / (virtScreenWidth - 1);
+        input.mi.dy = ((globalY - virtTop) * 65535) / (virtScreenHeight - 1);
+        input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+        return input;
+    }
+
+    void MoveMouseAbsolute(int32_t x, int32_t y) override {
+        Log("PlatformInputWin: MoveMouseAbsolute x=" + std::to_string(x) + " y=" + std::to_string(y));
+        INPUT input = BuildAbsoluteMouseInput(x, y);
         SendInput(1, &input, sizeof(INPUT));
     }
 
@@ -741,12 +860,7 @@ class PlatformInputWin : public IPlatformInput {
                     input.mi.dwFlags = MOUSEEVENTF_MOVE;
                     eventInputs.push_back(input);
                 } else if constexpr (std::is_same_v<T, struct MouseMoveAbsolute>) {
-                    INPUT input = { 0 };
-                    input.type = INPUT_MOUSE;
-                    input.mi.dx = (e.x * 65535) / (GetSystemMetrics(SM_CXSCREEN) - 1);
-                    input.mi.dy = (e.y * 65535) / (GetSystemMetrics(SM_CYSCREEN) - 1);
-                    input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
-                    eventInputs.push_back(input);
+                    eventInputs.push_back(BuildAbsoluteMouseInput(e.x, e.y));
                 } else if constexpr (std::is_same_v<T, struct MouseClick>) {
                     INPUT input = { 0 };
                     input.type = INPUT_MOUSE;

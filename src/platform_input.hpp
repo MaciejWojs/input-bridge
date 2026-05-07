@@ -27,6 +27,17 @@ struct KeyPress {
 struct MouseScroll { int32_t delta; };
 struct TypeCharacter { uint32_t charCode; InputRoute routedTo = InputRoute::Unicode; };
 
+struct MonitorInfo {
+    int32_t index = 0;
+    std::string id;
+    std::string name;
+    int32_t x = 0;
+    int32_t y = 0;
+    int32_t width = 0;
+    int32_t height = 0;
+    bool primary = false;
+};
+
 using InputEvent = std::variant<MouseMoveRelative, MouseMoveAbsolute, MouseClick, KeyPress, MouseScroll, TypeCharacter>;
 
 class IPlatformInput {
@@ -84,6 +95,9 @@ class IPlatformInput {
     // Gets file descriptors from a remote-capable clipboard format. Returns file names
     // if available, or std::nullopt otherwise.
     virtual std::optional<std::vector<std::string>> GetClipboardFilesRemote() = 0;
+
+    virtual std::vector<MonitorInfo> GetMonitors() = 0;
+    virtual bool SetCurrentMonitor(int32_t monitorIndex) = 0;
 
     using ClipboardChangeCallback = std::function<void(const std::string& type, const std::vector<std::string>& files, const std::string& text)>;
     virtual void SetClipboardChangeCallback(ClipboardChangeCallback cb) {

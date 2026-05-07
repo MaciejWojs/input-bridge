@@ -55,11 +55,26 @@ std::unique_ptr<IPlatformInput> CreatePlatformInput() {
     return std::make_unique<PlatformInputImpl>();
 }
 
+static Napi::Object MonitorInfoToJs(Napi::Env env, const MonitorInfo& monitor) {
+    Napi::Object obj = Napi::Object::New(env);
+    obj.Set("index", Napi::Number::New(env, monitor.index));
+    obj.Set("id", Napi::String::New(env, monitor.id));
+    obj.Set("name", Napi::String::New(env, monitor.name));
+    obj.Set("x", Napi::Number::New(env, monitor.x));
+    obj.Set("y", Napi::Number::New(env, monitor.y));
+    obj.Set("width", Napi::Number::New(env, monitor.width));
+    obj.Set("height", Napi::Number::New(env, monitor.height));
+    obj.Set("primary", Napi::Boolean::New(env, monitor.primary));
+    return obj;
+}
+
 class InputBridge : public Napi::ObjectWrap<InputBridge> {
     public:
     static Napi::Object Init(Napi::Env env, Napi::Object exports) {
         Napi::Function func = DefineClass(env, "InputBridge", {
             InstanceMethod("init", &InputBridge::InitAsync),
+            InstanceMethod("getMonitors", &InputBridge::GetMonitors),
+            InstanceMethod("setCurrentMonitor", &InputBridge::SetCurrentMonitor),
             InstanceMethod("moveMouseRelative", &InputBridge::MoveMouseRelative),
             InstanceMethod("moveMouseAbsolute", &InputBridge::MoveMouseAbsolute),
             InstanceMethod("mouseClick", &InputBridge::MouseClick),
@@ -489,6 +504,27 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
         worker->Queue();
 
         return deferred.Promise();
+    }
+
+    Napi::Value GetMonitors(const Napi::CallbackInfo& info) {
+        (void)info;
+        Napi::Env env = info.Env();
+        const std::vector<MonitorInfo> monitors = m_queue.GetPlatform()->GetMonitors();
+        Napi::Array result = Napi::Array::New(env, monitors.size());
+        for (size_t i = 0; i < monitors.size(); ++i) {
+            result[i] = MonitorInfoToJs(env, monitors[i]);
+        }
+        return result;
+    }
+
+    Napi::Value SetCurrentMonitor(const Napi::CallbackInfo& info) {
+        if (info.Length() < 1 || !info[0].IsNumber()) {
+            Napi::TypeError::New(info.Env(), "Expected monitor index as number").ThrowAsJavaScriptException();
+            return info.Env().Undefined();
+        }
+
+        bool ok = m_queue.GetPlatform()->SetCurrentMonitor(info[0].As<Napi::Number>().Int32Value());
+        return Napi::Boolean::New(info.Env(), ok);
     }
 
     void Log(const std::string& msg) {

@@ -29,7 +29,8 @@
           ],
           "libraries": [
             "-lX11",
-            "-lXtst"
+            "-lXtst",
+            "-lXrandr"
           ]
         }],
 

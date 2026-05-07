@@ -7,6 +7,28 @@ const __dirname = path.dirname(__filename);
 
 export type ClipboardEventType = 'text' | 'files';
 
+/**
+ * Describes a monitor exposed by the native backend.
+ */
+export interface MonitorInfo {
+    /** Stable session index used with `setCurrentMonitor()`. */
+    index: number;
+    /** Native monitor identifier or output name. */
+    id: string;
+    /** Human-readable monitor name. */
+    name: string;
+    /** Left edge in virtual desktop coordinates. */
+    x: number;
+    /** Top edge in virtual desktop coordinates. */
+    y: number;
+    /** Monitor width in pixels. */
+    width: number;
+    /** Monitor height in pixels. */
+    height: number;
+    /** Whether this is the primary/default monitor. */
+    primary: boolean;
+}
+
 export interface ClipboardEvent {
     /**
      * The type of clipboard update.
@@ -161,6 +183,21 @@ export interface IInputBridge {
     getClipboardFilesRemote(): string[] | null;
 
     /**
+     * Returns the monitors known to the native backend.
+     *
+     * @returns A list of monitor descriptors.
+     */
+    getMonitors(): MonitorInfo[];
+
+    /**
+     * Selects the active monitor used by `moveMouseAbsolute(x, y)`.
+     *
+     * @param index - Monitor index returned by `getMonitors()`.
+     * @returns `true` if the monitor was selected, `false` otherwise.
+     */
+    setCurrentMonitor(index: number): boolean;
+
+    /**
      * Asynchronously initializes the native input bridge.
      * On Linux (Wayland), this requests a RemoteDesktop portal session and waits
      * for the user to grant permission. Returns a resolved Promise on success,
@@ -185,15 +222,17 @@ export interface IInputBridge {
     moveMouseRelative(x: number, y: number): void;
 
     /**
-     * Queues an absolute mouse movement to a specific screen coordinate.
+     * Queues an absolute mouse movement within the currently selected monitor.
+     * Coordinates are local to that monitor (`0,0` = top-left of active monitor).
      * 
-     * @param x - The absolute X coordinate.
-     * @param y - The absolute Y coordinate.
+     * @param x - The local X coordinate on the active monitor.
+     * @param y - The local Y coordinate on the active monitor.
      * @throws {TypeError} If `x` or `y` is not a number.
      * 
      * @example
      * ```typescript
-     * bridge.moveMouseAbsolute(1920 / 2, 1080 / 2); // move to center of a 1080p screen
+     * bridge.setCurrentMonitor(0);
+     * bridge.moveMouseAbsolute(960, 540); // center of selected 1920x1080 monitor
      * bridge.flush();
      * ```
      */
@@ -636,6 +675,13 @@ export class InputBridge implements IInputBridge {
         return this.nativeBridge.getClipboardFilesRemote();
     }
 
+    getMonitors(): MonitorInfo[] {
+        return this.nativeBridge.getMonitors();
+    }
+
+    setCurrentMonitor(index: number): boolean {
+        return this.nativeBridge.setCurrentMonitor(index);
+    }
 }
 
 export default { InputBridge };
