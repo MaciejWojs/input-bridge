@@ -639,12 +639,17 @@ class PlatformInputWin : public IPlatformInput {
         // No-op for Windows as requested.
     }
 
-    bool SetCurrentMonitor(int32_t monitorIndex) override {
+    bool SetCurrentMonitor(int32_t monitorIndex, int32_t width, int32_t height) override {
         if (monitorIndex < 0 || static_cast<size_t>(monitorIndex) >= m_monitors.size()) {
             return false;
         }
 
         m_currentMonitorIndex = monitorIndex;
+        if (width > 0 && height > 0) {
+            m_monitors[static_cast<size_t>(monitorIndex)].width = width;
+            m_monitors[static_cast<size_t>(monitorIndex)].height = height;
+        }
+
         return true;
     }
 

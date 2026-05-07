@@ -210,9 +210,11 @@ export interface IInputBridge {
      * Selects the active monitor used by `moveMouseAbsolute(x, y)`.
      *
      * @param index - Monitor index returned by `getMonitors()`.
+     * @param width - Current width of the monitor (updates resolution for normalization).
+     * @param height - Current height of the monitor (updates resolution for normalization).
      * @returns `true` if the monitor was selected, `false` otherwise.
      */
-    setCurrentMonitor(index: number): boolean;
+    setCurrentMonitor(index: number, width: number, height: number): boolean;
 
     /**
      * Asynchronously initializes the native input bridge.
@@ -700,8 +702,8 @@ export class InputBridge implements IInputBridge {
         this.nativeBridge.setMonitors(monitors);
     }
 
-    setCurrentMonitor(index: number): boolean {
-        return this.nativeBridge.setCurrentMonitor(index);
+    setCurrentMonitor(index: number, width: number, height: number): boolean {
+        return this.nativeBridge.setCurrentMonitor(index, width, height);
     }
 }
 

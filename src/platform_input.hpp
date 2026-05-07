@@ -98,7 +98,7 @@ class IPlatformInput {
 
     virtual std::vector<MonitorInfo> GetMonitors() = 0;
     virtual void SetMonitors(const std::vector<MonitorInfo>& monitors) = 0;
-    virtual bool SetCurrentMonitor(int32_t monitorIndex) = 0;
+    virtual bool SetCurrentMonitor(int32_t monitorIndex, int32_t width, int32_t height) = 0;
 
     using ClipboardChangeCallback = std::function<void(const std::string& type, const std::vector<std::string>& files, const std::string& text)>;
     virtual void SetClipboardChangeCallback(ClipboardChangeCallback cb) {

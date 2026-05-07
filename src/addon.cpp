@@ -550,12 +550,15 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
     }
 
     Napi::Value SetCurrentMonitor(const Napi::CallbackInfo& info) {
-        if (info.Length() < 1 || !info[0].IsNumber()) {
-            Napi::TypeError::New(info.Env(), "Expected monitor index as number").ThrowAsJavaScriptException();
+        if (info.Length() < 3 || !info[0].IsNumber() || !info[1].IsNumber() || !info[2].IsNumber()) {
+            Napi::TypeError::New(info.Env(), "Expected monitor index, width, and height as numbers").ThrowAsJavaScriptException();
             return info.Env().Undefined();
         }
 
-        bool ok = m_queue.GetPlatform()->SetCurrentMonitor(info[0].As<Napi::Number>().Int32Value());
+        int32_t index = info[0].As<Napi::Number>().Int32Value();
+        int32_t width = info[1].As<Napi::Number>().Int32Value();
+        int32_t height = info[2].As<Napi::Number>().Int32Value();
+        bool ok = m_queue.GetPlatform()->SetCurrentMonitor(index, width, height);
         return Napi::Boolean::New(info.Env(), ok);
     }
 

@@ -1521,10 +1521,6 @@ class PlatformInputLinux : public IPlatformInput {
             // Use a tighter clamp with some margin to avoid boundary issues
             normX = std::clamp((static_cast<double>(x) + 0.5) / width, 0.0001, 0.9999);
             normY = std::clamp((static_cast<double>(y) + 0.5) / height, 0.0001, 0.9999);
-            
-            // Ensure we don't hit exactly 1.0 due to floating point precision
-            if (normX >= 1.0) normX = 0.9999;
-            if (normY >= 1.0) normY = 0.9999;
         }
 
 #if INPUT_BRIDGE_HAS_LIBEI
@@ -1541,12 +1537,8 @@ class PlatformInputLinux : public IPlatformInput {
         GVariantBuilder options_builder;
         g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
 
-        // The FDO portal expects normalized coordinates as double [0.0, 1.0]
-        // Use double directly for the portal API
-        const double normY_d = normY;
-
-        // Try using NotifyPointerMotionAbsolute with double coordinates
-        // Signature: session (o), options (@a{sv}), x (u), y (d), z (d)
+        // The RemoteDesktop portal expects: session (o), options (a{sv}), x (d), y (d)
+        // Your previous signature (o@a{sv}udd) was incorrect for this portal method.
         if (m_batchMode) {
             GError* error = nullptr;
             GVariant* result = g_dbus_connection_call_sync(
@@ -1555,7 +1547,7 @@ class PlatformInputLinux : public IPlatformInput {
                 "/org/freedesktop/portal/desktop",
                 "org.freedesktop.portal.RemoteDesktop",
                 "NotifyPointerMotionAbsolute",
-                g_variant_new("(o@a{sv}udd)", session_handle.c_str(), g_variant_builder_end(&options_builder), (guint32)(normX * 65535), normY_d, 0.0),
+                g_variant_new("(o@a{sv}dd)", session_handle.c_str(), g_variant_builder_end(&options_builder), normX, normY),
                 nullptr,
                 G_DBUS_CALL_FLAGS_NONE,
                 -1,
@@ -1582,7 +1574,7 @@ class PlatformInputLinux : public IPlatformInput {
             "/org/freedesktop/portal/desktop",
             "org.freedesktop.portal.RemoteDesktop",
             "NotifyPointerMotionAbsolute",
-            g_variant_new("(o@a{sv}udd)", session_handle.c_str(), g_variant_builder_end(&options_builder), (guint32)(normX * 65535), normY_d, 0.0),
+            g_variant_new("(o@a{sv}dd)", session_handle.c_str(), g_variant_builder_end(&options_builder), normX, normY),
             nullptr,
             G_DBUS_CALL_FLAGS_NONE,
             -1,
@@ -1611,13 +1603,19 @@ class PlatformInputLinux : public IPlatformInput {
         }
     }
 
-    bool SetCurrentMonitor(int32_t monitorIndex) override {
+    bool SetCurrentMonitor(int32_t monitorIndex, int32_t width, int32_t height) override {
         std::lock_guard<std::mutex> lock(m_monitorMutex);
         if (monitorIndex < 0 || static_cast<size_t>(monitorIndex) >= m_monitors.size()) {
             return false;
         }
 
         m_currentMonitorIndex = monitorIndex;
+        if (width > 0 && height > 0) {
+            m_monitors[static_cast<size_t>(monitorIndex)].width = width;
+            m_monitors[static_cast<size_t>(monitorIndex)].height = height;
+            UpdateVirtualDesktopBounds();
+        }
+
         return true;
     }
 
