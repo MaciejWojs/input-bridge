@@ -18,7 +18,12 @@ enum class InputRoute {
 struct MouseMoveRelative { int32_t x; int32_t y; };
 struct MouseMoveAbsolute { int32_t x; int32_t y; };
 struct MouseClick { int32_t button; bool down; };
-struct KeyPress { int32_t keyCode; bool down; InputRoute routedTo = InputRoute::Keyboard; };
+struct KeyPress {
+    int32_t keyCode;
+    bool down;
+    InputRoute routedTo = InputRoute::Keyboard;
+    std::string domCode = "";
+};
 struct MouseScroll { int32_t delta; };
 struct TypeCharacter { uint32_t charCode; InputRoute routedTo = InputRoute::Unicode; };
 
@@ -50,6 +55,29 @@ class IPlatformInput {
 
     virtual bool Initialize(std::string& error_msg) { return true; }
 
+    // Linux RemoteDesktop transport controls.
+    // Supported modes are backend-specific. Linux portal backend supports: "notify" and "eis".
+    virtual bool SetInputMode(const std::string& mode, std::string& error_msg) {
+        (void)mode;
+        error_msg = "Input mode is not supported on this platform";
+        return false;
+    }
+
+    virtual std::string GetInputMode() const {
+        return "notify";
+    }
+
+    virtual bool ConnectToEIS(std::string& error_msg) {
+        error_msg = "EIS is not supported on this platform";
+        return false;
+    }
+
+    virtual void DisconnectEIS() {}
+
+    virtual bool IsEISConnected() const {
+        return false;
+    }
+
     // Clipboard API
     // Sets text to clipboard. Returns true on success.
     virtual bool SetClipboardText(const std::string& text) = 0;
@@ -75,6 +103,38 @@ class IPlatformInput {
     virtual void SetClipboardChangeCallback(ClipboardChangeCallback cb) {
         (void)cb;
     }
+
+    using InputEventCallback = std::function<void(const InputEvent& ev)>;
+    /**
+     * Sets a callback that will be invoked for incoming input events (push)
+     * coming from the platform (e.g. captured keyboard/mouse events).
+     * Default implementation is a no-op.
+     */
+    virtual void SetInputEventCallback(InputEventCallback cb) {
+        (void)cb;
+    }
+
+    /**
+     * Sets the distance threshold (in pixels) for optimizing detected mouse movements.
+     * Movements smaller than this threshold will be dropped by the hook.
+     * @param distanceThreshold 0 disables optimization.
+     */
+    virtual void SetDetectionOptimizationThreshold(int distanceThreshold) {
+        (void)distanceThreshold;
+    }
+
+    /**
+     * Starts global input detection (hooks).
+     * @returns true if successful.
+     */
+    virtual bool StartInputDetection() {
+        return false;
+    }
+
+    /**
+     * Stops global input detection (hooks).
+     */
+    virtual void StopInputDetection() {}
 
     void SetLogCallback(std::function<void(const std::string&)> cb) {
         m_log = cb;

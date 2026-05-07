@@ -41,11 +41,64 @@ export interface ClipboardEvent {
     data: string | string[];
 }
 
+export type InputEventType =
+    | 'mouse_move_relative'
+    | 'mouse_move_absolute'
+    | 'mouse_click'
+    | 'key_press'
+    | 'mouse_scroll'
+    | 'type_character';
+
+export interface InputEvent {
+    type: InputEventType;
+    x?: number;
+    y?: number;
+    button?: number;
+    down?: boolean;
+    keyCode?: number;
+    charCode?: number;
+    delta?: number;
+    domCode?: string;
+}
+
 /**
  * Interface representing the native input bridge for simulating hardware events.
  * Actions are queued and must be dispatched using `flush()`.
  */
 export interface IInputBridge {
+
+    /**
+     * Sets Linux portal input transport mode.
+     * 
+     * Supported values:
+     * - `notify`: legacy `Notify*` D-Bus calls
+     * - `eis`: request EIS transport via `ConnectToEIS`
+     * 
+     * @param mode - Transport mode (`notify` or `eis`).
+     * @returns `true` on success.
+     */
+    setInputMode(mode: 'notify' | 'eis'): boolean;
+
+    /**
+     * Returns currently selected Linux portal input transport mode.
+     */
+    getInputMode(): string;
+
+    /**
+     * Attempts to connect the active RemoteDesktop session to EIS.
+     * Must be called after successful `init()`.
+     */
+    connectToEIS(): boolean;
+
+    /**
+     * Closes active EIS connection and returns to notify mode.
+     */
+    disconnectEIS(): void;
+
+    /**
+     * Indicates whether EIS channel is currently connected.
+     */
+    isEISConnected(): boolean;
 
     /**
      * Sets the clipboard text (Unicode string).
@@ -344,6 +397,42 @@ export interface IInputBridge {
     offClipboard(): void;
 
     /**
+     * Registers a callback to receive pushed input events (keyboard/mouse) from the platform.
+     * The callback receives an `InputEvent` object describing the event.
+     */
+    onInput(callback: (event: InputEvent) => void): void;
+
+    /**
+     * Removes the registered input event listener.
+     */
+    offInput(): void;
+
+    /**
+     * Starts global input detection (hooks) on supported platforms (Windows).
+     * Needs to be called to start receiving events via `onInput`.
+     * 
+     * @returns `true` if detection started successfully, `false` otherwise.
+     * 
+     * @platform Windows: Supported. Linux: Not implemented.
+     */
+    startInputDetection(): boolean;
+
+    /**
+     * Stops global input detection (hooks) on supported platforms.
+     * 
+     * @platform Windows: Supported. Linux: Not implemented.
+     */
+    stopInputDetection(): void;
+
+    /**
+     * Sets the distance threshold for optimizing detected input moves (hooks).
+     * Movements smaller than this threshold will be filtered out.
+     * 
+     * @param distanceThreshold - The distance threshold in pixels. 0 disables optimization.
+     */
+    optimizeInputDetection(distanceThreshold: number): void;
+
+    /**
      * Simulates a hardware key press using a standard `KeyboardEvent.code` string, 
      * acting as a universal Plug-and-Play mechanism.
      * 
@@ -387,6 +476,9 @@ import { mapDomCodeToNativeTarget } from './dom_mapper.js';
  * - `autoFlush`: If true, automatically calls `flush()` after every input action.
  *   Disable this if you want to batch multiple actions together for performance.
  *   @default false
+ * - `flushIntervalMs`: If set to a positive number, automatically flushes queued input events
+ *   at this interval (in milliseconds). If 0 or negative, auto-flush is disabled.
+ *   @default 0 (disabled)
  */
 export interface InputBridgeOptions {
     /**
@@ -395,6 +487,14 @@ export interface InputBridgeOptions {
      * @default false
      */
     autoFlush?: boolean;
+
+    /**
+     * If set to a positive number, automatically flushes queued input events
+     * at this interval (in milliseconds). Helps prevent blocking Node.js event loop
+     * by batching events and flushing them periodically.
+     * @default 0 (disabled)
+     */
+    flushIntervalMs?: number;
 }
 
 /**
@@ -410,14 +510,44 @@ export class InputBridge implements IInputBridge {
 
     private nativeBridge: IInputBridge;
     public autoFlush: boolean;
+    private flushIntervalMs: number;
+    private flushTimer: NodeJS.Timeout | null = null;
 
     constructor(options?: InputBridgeOptions) {
         this.nativeBridge = new native.InputBridge();
         this.autoFlush = options?.autoFlush ?? false;
+        this.flushIntervalMs = options?.flushIntervalMs ?? 0;
+
+        // Start auto-flush timer if interval is specified
+        if (this.flushIntervalMs > 0) {
+            this.flushTimer = setInterval(() => {
+                this.flush();
+            }, this.flushIntervalMs);
+        }
     }
 
     async init(): Promise<void> {
         return this.nativeBridge.init();
+    }
+
+    setInputMode(mode: 'notify' | 'eis'): boolean {
+        return this.nativeBridge.setInputMode(mode);
+    }
+
+    getInputMode(): string {
+        return this.nativeBridge.getInputMode();
+    }
+
+    connectToEIS(): boolean {
+        return this.nativeBridge.connectToEIS();
+    }
+
+    disconnectEIS(): void {
+        this.nativeBridge.disconnectEIS();
+    }
+
+    isEISConnected(): boolean {
+        return this.nativeBridge.isEISConnected();
     }
 
     moveMouseRelative(x: number, y: number): void {
@@ -478,6 +608,37 @@ export class InputBridge implements IInputBridge {
 
     offClipboard(): void {
         this.nativeBridge.offClipboard();
+    }
+
+    onInput(callback: (event: InputEvent) => void): void {
+        this.nativeBridge.onInput(callback as any);
+    }
+
+    offInput(): void {
+        this.nativeBridge.offInput();
+    }
+
+    startInputDetection(): boolean {
+        return this.nativeBridge.startInputDetection();
+    }
+
+    stopInputDetection(): void {
+        this.nativeBridge.stopInputDetection();
+    }
+
+    optimizeInputDetection(distanceThreshold: number): void {
+        this.nativeBridge.optimizeInputDetection(distanceThreshold);
+    }
+
+    /**
+     * Stops the auto-flush timer if it is running.
+     * Call this before discarding the instance to clean up resources.
+     */
+    stopAutoFlush(): void {
+        if (this.flushTimer !== null) {
+            clearInterval(this.flushTimer);
+            this.flushTimer = null;
+        }
     }
 
     keyPressDOM(domCode: string, down: boolean): boolean {

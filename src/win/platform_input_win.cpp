@@ -349,6 +349,131 @@ class PlatformInputWin : public IPlatformInput {
     std::condition_variable m_clipboardReady;
     HWND m_clipboardWindow = nullptr;
 
+    InputEventCallback m_inputCallback;
+    std::jthread m_inputDetectionThread;
+    std::atomic<bool> m_inputDetectionRunning{ false };
+    std::mutex m_inputDetectionMutex;
+    std::condition_variable m_inputDetectionReady;
+    DWORD m_inputDetectionThreadId = 0;
+    HHOOK m_kbHook = nullptr;
+    HHOOK m_msHook = nullptr;
+
+    std::atomic<int> m_detectionDistanceThreshold{ 0 };
+    std::atomic<int> m_lastDetectedMouseX{ -1 };
+    std::atomic<int> m_lastDetectedMouseY{ -1 };
+
+    static PlatformInputWin* s_instance;
+
+    static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
+        if (nCode == HC_ACTION && s_instance && s_instance->m_inputCallback) {
+            KBDLLHOOKSTRUCT* pkbhs = reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
+            ::KeyPress kp;
+            kp.keyCode = static_cast<int32_t>(pkbhs->vkCode);
+            kp.down = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
+
+            char name[256];
+            LONG scancode = pkbhs->scanCode << 16;
+            if (pkbhs->flags & LLKHF_EXTENDED) {
+                scancode |= 0x01000000;
+            }
+            if (GetKeyNameTextA(scancode, name, 256) > 0) {
+                kp.domCode = std::string(name);
+            }
+
+            InputEvent ev = kp;
+            s_instance->m_inputCallback(ev);
+        }
+        return CallNextHookEx(nullptr, nCode, wParam, lParam);
+    }
+
+    static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
+        if (nCode == HC_ACTION && s_instance && s_instance->m_inputCallback) {
+            MSLLHOOKSTRUCT* pmshs = reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
+            if (wParam == WM_MOUSEMOVE) {
+                int x = static_cast<int32_t>(pmshs->pt.x);
+                int y = static_cast<int32_t>(pmshs->pt.y);
+                int threshold = s_instance->m_detectionDistanceThreshold.load(std::memory_order_relaxed);
+                int lastX = s_instance->m_lastDetectedMouseX.load(std::memory_order_relaxed);
+                int lastY = s_instance->m_lastDetectedMouseY.load(std::memory_order_relaxed);
+
+                if (threshold > 0 && lastX != -1) {
+                    long long dx = static_cast<long long>(x) - lastX;
+                    long long dy = static_cast<long long>(y) - lastY;
+                    if ((dx * dx + dy * dy) < static_cast<long long>(threshold * threshold)) {
+                        return CallNextHookEx(nullptr, nCode, wParam, lParam);
+                    }
+                }
+
+                s_instance->m_lastDetectedMouseX.store(x, std::memory_order_relaxed);
+                s_instance->m_lastDetectedMouseY.store(y, std::memory_order_relaxed);
+
+                ::MouseMoveAbsolute mm;
+                mm.x = x;
+                mm.y = y;
+                InputEvent ev = mm;
+                s_instance->m_inputCallback(ev);
+            } else if (wParam == WM_LBUTTONDOWN || wParam == WM_LBUTTONUP) {
+                ::MouseClick mc;
+                mc.button = 0;
+                mc.down = (wParam == WM_LBUTTONDOWN);
+                InputEvent ev = mc;
+                s_instance->m_inputCallback(ev);
+            } else if (wParam == WM_RBUTTONDOWN || wParam == WM_RBUTTONUP) {
+                ::MouseClick mc;
+                mc.button = 1;
+                mc.down = (wParam == WM_RBUTTONDOWN);
+                InputEvent ev = mc;
+                s_instance->m_inputCallback(ev);
+            } else if (wParam == WM_MBUTTONDOWN || wParam == WM_MBUTTONUP) {
+                ::MouseClick mc;
+                mc.button = 2;
+                mc.down = (wParam == WM_MBUTTONDOWN);
+                InputEvent ev = mc;
+                s_instance->m_inputCallback(ev);
+            } else if (wParam == WM_MOUSEWHEEL) {
+                ::MouseScroll ms;
+                ms.delta = static_cast<int32_t>(static_cast<short>(HIWORD(pmshs->mouseData)));
+                InputEvent ev = ms;
+                s_instance->m_inputCallback(ev);
+            }
+        }
+        return CallNextHookEx(nullptr, nCode, wParam, lParam);
+    }
+
+    void RunInputDetectionLoop() {
+        {
+            std::lock_guard<std::mutex> lock(m_inputDetectionMutex);
+            m_inputDetectionThreadId = GetCurrentThreadId();
+
+            s_instance = this;
+            m_kbHook = SetWindowsHookEx(WH_KEYBOARD_LL, LowLevelKeyboardProc, GetModuleHandle(nullptr), 0);
+            m_msHook = SetWindowsHookEx(WH_MOUSE_LL, LowLevelMouseProc, GetModuleHandle(nullptr), 0);
+
+            m_inputDetectionReady.notify_all();
+        }
+
+        MSG msg;
+        while (GetMessage(&msg, nullptr, 0, 0)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(m_inputDetectionMutex);
+            if (m_kbHook) {
+                UnhookWindowsHookEx(m_kbHook);
+                m_kbHook = nullptr;
+            }
+            if (m_msHook) {
+                UnhookWindowsHookEx(m_msHook);
+                m_msHook = nullptr;
+            }
+            s_instance = nullptr;
+            m_inputDetectionThreadId = 0;
+            m_inputDetectionRunning = false;
+        }
+    }
+
     static LRESULT CALLBACK ClipboardWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
         if (message == WM_CREATE) {
             AddClipboardFormatListener(hwnd);
@@ -922,4 +1047,54 @@ class PlatformInputWin : public IPlatformInput {
         CloseClipboard();
         return files;
     }
+
+    bool StartInputDetection() override {
+        bool expected = false;
+        if (!m_inputDetectionRunning.compare_exchange_strong(expected, true)) {
+            return true; // Already running
+        }
+
+        // Reset positions to ensure the first movement is always captured
+        m_lastDetectedMouseX.store(-1, std::memory_order_relaxed);
+        m_lastDetectedMouseY.store(-1, std::memory_order_relaxed);
+
+        m_inputDetectionThread = std::jthread([this]() {
+            RunInputDetectionLoop();
+            });
+
+        std::unique_lock<std::mutex> lock(m_inputDetectionMutex);
+        m_inputDetectionReady.wait(lock, [this]() {
+            return (m_kbHook != nullptr && m_msHook != nullptr) || !m_inputDetectionRunning.load();
+            });
+
+        return m_kbHook != nullptr && m_msHook != nullptr;
+    }
+
+    void StopInputDetection() override {
+        bool expected = true;
+        if (m_inputDetectionRunning.compare_exchange_strong(expected, false)) {
+            DWORD threadId = 0;
+            {
+                std::lock_guard<std::mutex> lock(m_inputDetectionMutex);
+                threadId = m_inputDetectionThreadId;
+            }
+            if (threadId != 0) {
+                PostThreadMessage(threadId, WM_QUIT, 0, 0);
+            }
+
+            if (m_inputDetectionThread.joinable()) {
+                m_inputDetectionThread.join();
+            }
+        }
+    }
+
+    void SetInputEventCallback(InputEventCallback cb) override {
+        m_inputCallback = cb;
+    }
+
+    void SetDetectionOptimizationThreshold(int distanceThreshold) override {
+        m_detectionDistanceThreshold.store(distanceThreshold, std::memory_order_relaxed);
+    }
 };
+
+PlatformInputWin* PlatformInputWin::s_instance = nullptr;
