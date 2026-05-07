@@ -1503,31 +1503,28 @@ class PlatformInputLinux : public IPlatformInput {
 
         double normX = 0.0;
         double normY = 0.0;
+        int32_t mw = 1920, mh = 1080;
+        std::string mname;
 
         {
             std::lock_guard<std::mutex> lock(m_monitorMutex);
             const MonitorInfo& monitor = GetCurrentMonitor();
+            mw = monitor.width; mh = monitor.height; mname = monitor.name;
 
-            int32_t localX = x;
-            int32_t localY = y;
+            // Normalize relative to the current monitor.
+            // GNOME/Mutter portal maps [0, 1] to the logical bounding box of shared streams.
+            // For single-monitor capture, we must use local normalization.
+            double width = mw > 0 ? static_cast<double>(mw) : 1920.0;
+            double height = mh > 0 ? static_cast<double>(mh) : 1080.0;
 
-            // 1. Clamp coordinates to selected monitor bounds
-            if (monitor.width > 0) {
-                localX = std::max(0, std::min(localX, monitor.width - 1));
-            }
-            if (monitor.height > 0) {
-                localY = std::max(0, std::min(localY, monitor.height - 1));
-            }
-
-            // 2. Determine global coordinates relative to virtual desktop
-            const int32_t globalX = monitor.x + localX;
-            const int32_t globalY = monitor.y + localY;
-
-            // 3. Normalize to [0.0, 1.0) range using pre-calculated virtual desktop bounds.
-            // Using pixel-edge mapping and a conservative clamp to 0.9999 prevents 
-            // "Invalid position" errors on compositors with strict boundary checks.
-            normX = std::clamp(static_cast<double>(globalX - m_virtMinX) / static_cast<double>(m_virtWidth), 0.0, 0.9999);
-            normY = std::clamp(static_cast<double>(globalY - m_virtMinY) / static_cast<double>(m_virtHeight), 0.0, 0.9999);
+            // Target pixel centers (+0.5) and clamp to [0, 1) range.
+            // Use a tighter clamp with some margin to avoid boundary issues
+            normX = std::clamp((static_cast<double>(x) + 0.5) / width, 0.0001, 0.9999);
+            normY = std::clamp((static_cast<double>(y) + 0.5) / height, 0.0001, 0.9999);
+            
+            // Ensure we don't hit exactly 1.0 due to floating point precision
+            if (normX >= 1.0) normX = 0.9999;
+            if (normY >= 1.0) normY = 0.9999;
         }
 
 #if INPUT_BRIDGE_HAS_LIBEI
@@ -1544,6 +1541,12 @@ class PlatformInputLinux : public IPlatformInput {
         GVariantBuilder options_builder;
         g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
 
+        // The FDO portal expects normalized coordinates as double [0.0, 1.0]
+        // Use double directly for the portal API
+        const double normY_d = normY;
+
+        // Try using NotifyPointerMotionAbsolute with double coordinates
+        // Signature: session (o), options (@a{sv}), x (u), y (d), z (d)
         if (m_batchMode) {
             GError* error = nullptr;
             GVariant* result = g_dbus_connection_call_sync(
@@ -1552,7 +1555,7 @@ class PlatformInputLinux : public IPlatformInput {
                 "/org/freedesktop/portal/desktop",
                 "org.freedesktop.portal.RemoteDesktop",
                 "NotifyPointerMotionAbsolute",
-                g_variant_new("(o@a{sv}udd)", session_handle.c_str(), g_variant_builder_end(&options_builder), (guint32)0, normX, normY),
+                g_variant_new("(o@a{sv}udd)", session_handle.c_str(), g_variant_builder_end(&options_builder), (guint32)(normX * 65535), normY_d, 0.0),
                 nullptr,
                 G_DBUS_CALL_FLAGS_NONE,
                 -1,
@@ -1561,9 +1564,9 @@ class PlatformInputLinux : public IPlatformInput {
             );
 
             if (error) {
-                std::lock_guard<std::mutex> lock(m_monitorMutex);
-                std::cerr << "Failed to send NotifyPointerMotionAbsolute: " << error->message 
-                          << " (norm: " << normX << "," << normY << " on " << m_virtWidth << "x" << m_virtHeight << ")" << std::endl;
+                std::cerr << "Failed to send NotifyPointerMotionAbsolute (double): " << error->message 
+                          << " (norm: " << normX << "," << normY 
+                          << " on monitor " << mw << "x" << mh << " [" << mname << "])" << std::endl;
                 g_error_free(error);
             }
 
@@ -1579,7 +1582,7 @@ class PlatformInputLinux : public IPlatformInput {
             "/org/freedesktop/portal/desktop",
             "org.freedesktop.portal.RemoteDesktop",
             "NotifyPointerMotionAbsolute",
-            g_variant_new("(o@a{sv}udd)", session_handle.c_str(), g_variant_builder_end(&options_builder), (guint32)0, normX, normY),
+            g_variant_new("(o@a{sv}udd)", session_handle.c_str(), g_variant_builder_end(&options_builder), (guint32)(normX * 65535), normY_d, 0.0),
             nullptr,
             G_DBUS_CALL_FLAGS_NONE,
             -1,

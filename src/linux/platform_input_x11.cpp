@@ -239,6 +239,7 @@ class X11PlatformInput : public IPlatformInput {
     ClipboardChangeCallback m_clipboardCallback;
     std::mutex clipboard_callback_mutex;
     std::vector<MonitorInfo> m_monitors;
+    std::mutex m_monitorMutex;
     int32_t m_currentMonitorIndex = 0;
 
     bool SetClipboardText(const std::string& text) override {
@@ -459,14 +460,17 @@ class X11PlatformInput : public IPlatformInput {
     }
 
     std::vector<MonitorInfo> GetMonitors() override {
+        std::lock_guard<std::mutex> lock(m_monitorMutex);
         return m_monitors;
     }
 
     void SetMonitors(const std::vector<MonitorInfo>& monitors) override {
+        std::lock_guard<std::mutex> lock(m_monitorMutex);
         m_monitors = monitors;
     }
 
     bool SetCurrentMonitor(int32_t monitorIndex) override {
+        std::lock_guard<std::mutex> lock(m_monitorMutex);
         if (monitorIndex < 0 || static_cast<size_t>(monitorIndex) >= m_monitors.size()) {
             return false;
         }
@@ -476,6 +480,7 @@ class X11PlatformInput : public IPlatformInput {
     }
 
     const MonitorInfo& GetCurrentMonitor() const {
+        // Note: In a real app, this should ideally return a copy or be called under lock
         if (m_monitors.empty()) {
             static MonitorInfo fallbackMonitor{ 0, "default", "default", 0, 0, 1, 1, true };
             return fallbackMonitor;
@@ -489,7 +494,11 @@ class X11PlatformInput : public IPlatformInput {
     }
 
     void MoveMouseAbsolute(int32_t x, int32_t y) override {
-        const MonitorInfo& monitor = GetCurrentMonitor();
+        MonitorInfo monitor;
+        {
+            std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(m_monitorMutex));
+            monitor = GetCurrentMonitor();
+        }
 
         int32_t localX = x;
         int32_t localY = y;
