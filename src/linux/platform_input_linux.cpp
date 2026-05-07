@@ -1467,15 +1467,6 @@ class PlatformInputLinux : public IPlatformInput {
 
     void MoveMouseAbsolute(int32_t x, int32_t y) override {
         if (!is_session_ready) return;
-#if INPUT_BRIDGE_HAS_LIBEI
-        if (eis_connected.load(std::memory_order_relaxed)) {
-            EISDispatchPending();
-            if (HasEISDevice()) {
-                SendEISAbsoluteMotion(static_cast<double>(x), static_cast<double>(y));
-                return;
-            }
-        }
-#endif
 
         const MonitorInfo& monitor = GetCurrentMonitor();
 
@@ -1490,11 +1481,11 @@ class PlatformInputLinux : public IPlatformInput {
             localY = std::max(0, std::min(localY, monitor.height - 1));
         }
 
-        // 2. Wyznaczamy globalne współrzędne w pikselach względem wirtualnego pulpitu
+        // 2. Determine global coordinates in pixels relative to virtual desktop
         const int32_t globalX = monitor.x + localX;
         const int32_t globalY = monitor.y + localY;
 
-        // 3. Obliczamy granice całego wirtualnego pulpitu (wszystkich monitorów) do normalizacji
+        // 3. Calculate boundaries of the entire virtual desktop for normalization
         int32_t minX = 0, minY = 0, maxX = 0, maxY = 0;
         if (!m_monitors.empty()) {
             minX = m_monitors[0].x;
@@ -1515,9 +1506,20 @@ class PlatformInputLinux : public IPlatformInput {
         if (virtWidth <= 1) virtWidth = 1920; 
         if (virtHeight <= 1) virtHeight = 1080;
 
-        // 4. Normalizujemy do zakresu [0.0, 1.0] wymaganego przez portal RemoteDesktop
-        const double normX = std::clamp(static_cast<double>(globalX - minX) / static_cast<double>(virtWidth - 1), 0.0, 1.0);
-        const double normY = std::clamp(static_cast<double>(globalY - minY) / static_cast<double>(virtHeight - 1), 0.0, 1.0);
+        // 4. Normalize to [0.0, 1.0] range required by the RemoteDesktop portal.
+        // We use the full width/height as divisor to ensure the last pixel stays safely within bounds.
+        const double normX = std::clamp(static_cast<double>(globalX - minX) / static_cast<double>(virtWidth), 0.0, 1.0);
+        const double normY = std::clamp(static_cast<double>(globalY - minY) / static_cast<double>(virtHeight), 0.0, 1.0);
+
+#if INPUT_BRIDGE_HAS_LIBEI
+        if (eis_connected.load(std::memory_order_relaxed)) {
+            EISDispatchPending();
+            if (HasEISDevice()) {
+                SendEISAbsoluteMotion(normX, normY);
+                return;
+            }
+        }
+#endif
 
         const std::string session_handle = GetSessionHandle();
         GVariantBuilder options_builder;
