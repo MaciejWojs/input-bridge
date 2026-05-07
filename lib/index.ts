@@ -190,6 +190,15 @@ export interface IInputBridge {
     getMonitors(): MonitorInfo[];
 
     /**
+     * Manually sets the list of monitors in the native backend.
+     * This is particularly important for Linux Wayland backends to ensure 
+     * correct coordinate normalization when moving the mouse absolutely.
+     * 
+     * @param monitors - Array of monitor info objects.
+     */
+    setMonitors(monitors: MonitorInfo[]): void;
+
+    /**
      * Selects the active monitor used by `moveMouseAbsolute(x, y)`.
      *
      * @param index - Monitor index returned by `getMonitors()`.
@@ -677,6 +686,10 @@ export class InputBridge implements IInputBridge {
 
     getMonitors(): MonitorInfo[] {
         return this.nativeBridge.getMonitors();
+    }
+
+    setMonitors(monitors: MonitorInfo[]): void {
+        this.nativeBridge.setMonitors(monitors);
     }
 
     setCurrentMonitor(index: number): boolean {

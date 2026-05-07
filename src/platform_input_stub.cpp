@@ -31,6 +31,9 @@ class PlatformInputStub : public IPlatformInput {
         return {};
     }
 
+    void SetMonitors(const std::vector<MonitorInfo>&) override {
+    }
+
     bool SetCurrentMonitor(int32_t) override {
         return false;
     }

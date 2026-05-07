@@ -74,6 +74,7 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
         Napi::Function func = DefineClass(env, "InputBridge", {
             InstanceMethod("init", &InputBridge::InitAsync),
             InstanceMethod("getMonitors", &InputBridge::GetMonitors),
+            InstanceMethod("setMonitors", &InputBridge::SetMonitors),
             InstanceMethod("setCurrentMonitor", &InputBridge::SetCurrentMonitor),
             InstanceMethod("moveMouseRelative", &InputBridge::MoveMouseRelative),
             InstanceMethod("moveMouseAbsolute", &InputBridge::MoveMouseAbsolute),
@@ -515,6 +516,37 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
             result[i] = MonitorInfoToJs(env, monitors[i]);
         }
         return result;
+    }
+
+    Napi::Value SetMonitors(const Napi::CallbackInfo& info) {
+        if (info.Length() < 1 || !info[0].IsArray()) {
+            Napi::TypeError::New(info.Env(), "Expected array of MonitorMetadata").ThrowAsJavaScriptException();
+            return info.Env().Undefined();
+        }
+
+        Napi::Array arr = info[0].As<Napi::Array>();
+        std::vector<MonitorInfo> monitors;
+        monitors.reserve(arr.Length());
+
+        for (uint32_t i = 0; i < arr.Length(); ++i) {
+            Napi::Value v = arr[i];
+            if (!v.IsObject()) continue;
+
+            Napi::Object obj = v.As<Napi::Object>();
+            MonitorInfo m;
+            m.index = obj.Has("index") ? obj.Get("index").As<Napi::Number>().Int32Value() : 0;
+            m.id = obj.Has("id") ? obj.Get("id").As<Napi::String>().Utf8Value() : "";
+            m.name = obj.Has("name") ? obj.Get("name").As<Napi::String>().Utf8Value() : "";
+            m.x = obj.Has("x") ? obj.Get("x").As<Napi::Number>().Int32Value() : 0;
+            m.y = obj.Has("y") ? obj.Get("y").As<Napi::Number>().Int32Value() : 0;
+            m.width = obj.Has("width") ? obj.Get("width").As<Napi::Number>().Int32Value() : 0;
+            m.height = obj.Has("height") ? obj.Get("height").As<Napi::Number>().Int32Value() : 0;
+            m.primary = obj.Has("primary") ? obj.Get("primary").As<Napi::Boolean>().Value() : false;
+            monitors.push_back(std::move(m));
+        }
+
+        m_queue.GetPlatform()->SetMonitors(monitors);
+        return info.Env().Undefined();
     }
 
     Napi::Value SetCurrentMonitor(const Napi::CallbackInfo& info) {

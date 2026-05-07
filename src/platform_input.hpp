@@ -97,6 +97,7 @@ class IPlatformInput {
     virtual std::optional<std::vector<std::string>> GetClipboardFilesRemote() = 0;
 
     virtual std::vector<MonitorInfo> GetMonitors() = 0;
+    virtual void SetMonitors(const std::vector<MonitorInfo>& monitors) = 0;
     virtual bool SetCurrentMonitor(int32_t monitorIndex) = 0;
 
     using ClipboardChangeCallback = std::function<void(const std::string& type, const std::vector<std::string>& files, const std::string& text)>;

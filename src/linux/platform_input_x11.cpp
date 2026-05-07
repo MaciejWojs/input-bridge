@@ -462,6 +462,10 @@ class X11PlatformInput : public IPlatformInput {
         return m_monitors;
     }
 
+    void SetMonitors(const std::vector<MonitorInfo>& monitors) override {
+        m_monitors = monitors;
+    }
+
     bool SetCurrentMonitor(int32_t monitorIndex) override {
         if (monitorIndex < 0 || static_cast<size_t>(monitorIndex) >= m_monitors.size()) {
             return false;
