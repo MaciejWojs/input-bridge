@@ -36,7 +36,7 @@
 
         ["OS=='linux' and use_x11_backend!=1", {
           "defines+": [
-            # "INPUT_BRIDGE_DISABLE_LIBEI"
+            "INPUT_BRIDGE_DISABLE_LIBEI"
           ],
           "cflags_cc": [
             "<!@(pkg-config --cflags gio-2.0 gio-unix-2.0 glib-2.0 gobject-2.0 xkbcommon libei-1.0)"
