@@ -847,6 +847,10 @@ class PlatformInputLinux : public IPlatformInput {
     int32_t m_virtWidth = 1920;
     int32_t m_virtHeight = 1080;
 
+    // Śledzenie ostatnich współrzędnych myszy do emulacji ruchu względnego
+    int32_t m_lastX = 0;
+    int32_t m_lastY = 0;
+
     GMainContext* dbus_context = nullptr;
     GMainLoop* main_loop = nullptr;
     std::thread loop_thread;
@@ -1546,20 +1550,21 @@ class PlatformInputLinux : public IPlatformInput {
             monitorIndex = m_currentMonitorIndex;
         }
 
-        // Docelowo wyślemy localX, localY jako piksele
-        // (na razie zapisujemy oryginalne x,y do logu)
-        int32_t localX = x;
-        int32_t localY = y;
+        // Zakładamy, że x,y to współrzędne LOCALNE względem lewego górnego rogu aktywnego monitora
+        // (nie odejmujemy offsetu monitora - to, co dostarcza kontroler, jest już lokalne)
+        int32_t localX = std::clamp(x, 0, stream_w - 1);
+        int32_t localY = std::clamp(y, 0, stream_h - 1);
 
-        // LOGOWANIE DIAGNOSTYCZNE – dodaj dokładnie tu
+        // LOGOWANIE DIAGNOSTYCZNE
         std::cout << "[DEBUG MoveAbsolute] incoming x=" << x << " y=" << y
+                  << " localX=" << localX << " localY=" << localY
                   << " monitorIdx=" << monitorIndex
                   << " stream " << stream_w << "x" << stream_h
                   << std::endl;
 
         // Sprawdzenie, czy współrzędne są w zakresie monitora
         if (localX < 0 || localX >= stream_w || localY < 0 || localY >= stream_h) {
-            std::cerr << "[WARN] Coordinates out of stream bounds, but sending anyway: "
+            std::cerr << "[WARN] Coordinates out of stream bounds: "
                       << localX << "," << localY << std::endl;
         }
 
@@ -1581,6 +1586,18 @@ class PlatformInputLinux : public IPlatformInput {
         // Użyj rzeczywistego indeksu strumienia zamiast sztywnego 0u
         const uint32_t streamIndex = static_cast<uint32_t>(monitorIndex);
 
+        // Oblicz ruch względny (różnica między aktualnymi a poprzednimi współrzędnymi)
+        int32_t deltaX = localX - m_lastX;
+        int32_t deltaY = localY - m_lastY;
+
+        // Zaktualizuj lastX i lastY dla kolejnego wywołania
+        m_lastX = localX;
+        m_lastY = localY;
+
+        // Znormalizuj ruch względny do zakresu 0..1
+        double normDeltaX = static_cast<double>(deltaX) / stream_w;
+        double normDeltaY = static_cast<double>(deltaY) / stream_h;
+
         if (m_batchMode) {
             GError* error = nullptr;
             GVariant* result = g_dbus_connection_call_sync(
@@ -1588,10 +1605,10 @@ class PlatformInputLinux : public IPlatformInput {
                 "org.freedesktop.portal.Desktop",
                 "/org/freedesktop/portal/desktop",
                 "org.freedesktop.portal.RemoteDesktop",
-                "NotifyPointerMotionAbsolute",
-                g_variant_new("(o@a{sv}udd)", session_handle.c_str(),
+                "NotifyPointerMotion",
+                g_variant_new("(o@a{sv}dd)", session_handle.c_str(),
                               g_variant_builder_end(&options_builder),
-                              streamIndex, static_cast<double>(localX), static_cast<double>(localY)),
+                              normDeltaX, normDeltaY),
                 nullptr,
                 G_DBUS_CALL_FLAGS_NONE,
                 -1,
@@ -1600,8 +1617,9 @@ class PlatformInputLinux : public IPlatformInput {
             );
 
             if (error) {
-                std::cerr << "Failed to send NotifyPointerMotionAbsolute: " << error->message
-                          << " (pixels: " << localX << "," << localY
+                std::cerr << "Failed to send NotifyPointerMotion: " << error->message
+                          << " (delta: " << deltaX << "," << deltaY
+                          << " normalized: " << normDeltaX << "," << normDeltaY
                           << " on stream " << stream_w << "x" << stream_h << ")" << std::endl;
                 g_error_free(error);
             }
@@ -1614,10 +1632,10 @@ class PlatformInputLinux : public IPlatformInput {
             "org.freedesktop.portal.Desktop",
             "/org/freedesktop/portal/desktop",
             "org.freedesktop.portal.RemoteDesktop",
-            "NotifyPointerMotionAbsolute",
-            g_variant_new("(o@a{sv}udd)", session_handle.c_str(),
+            "NotifyPointerMotion",
+            g_variant_new("(o@a{sv}dd)", session_handle.c_str(),
                           g_variant_builder_end(&options_builder),
-                          streamIndex, static_cast<double>(localX), static_cast<double>(localY)),
+                          normDeltaX, normDeltaY),
             nullptr,
             G_DBUS_CALL_FLAGS_NONE,
             -1,
@@ -1658,6 +1676,11 @@ class PlatformInputLinux : public IPlatformInput {
             m_monitors[static_cast<size_t>(monitorIndex)].height = height;
             UpdateVirtualDesktopBounds();
         }
+
+        // Zresetuj ślad myszy przy zmianie monitora, aby uniknąć skoków
+        m_lastX = 0;
+        m_lastY = 0;
+        
 
         return true;
     }
