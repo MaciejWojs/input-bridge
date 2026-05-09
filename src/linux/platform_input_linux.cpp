@@ -866,6 +866,14 @@ class PlatformInputLinux : public IPlatformInput {
         return session_handle;
     }
 
+    std::optional<std::string> GetPortalSessionHandle() override {
+        const std::string handle = GetSessionHandle();
+        if (handle.empty()) {
+            return std::nullopt;
+        }
+        return handle;
+    }
+
     static MonitorInfo BuildDefaultMonitor() {
         MonitorInfo monitor;
         monitor.index = 0;
@@ -1086,6 +1094,7 @@ class PlatformInputLinux : public IPlatformInput {
         const bool is_create_resp = g_str_has_suffix(object_path, "createReq");
         const bool is_clipboard_resp = g_str_has_suffix(object_path, "clipboardReq");
         const bool is_select_resp = g_str_has_suffix(object_path, "selectReq");
+        const bool is_sources_resp = g_str_has_suffix(object_path, "sourcesReq");
         const bool is_start_resp = g_str_has_suffix(object_path, "startReq");
 
         std::cout << "Portal Response signal from: " << object_path
@@ -1161,13 +1170,97 @@ class PlatformInputLinux : public IPlatformInput {
         } else if (is_select_resp) {
             if (response == 0) {
                 std::cout << "SelectDevices completed successfully." << std::endl;
-                RequestClipboard(self);
+                SelectSources(self);
             } else {
                 std::cerr << "SelectDevices denied. Response: " << response << std::endl;
                 self->session_cv.notify_all();
             }
+        } else if (is_sources_resp) {
+            if (response == 0) {
+                std::cout << "ScreenCast.SelectSources completed successfully." << std::endl;
+                RequestClipboard(self);
+            } else {
+                std::cerr << "Screen capture permission denied. Response: " << response << std::endl;
+                self->session_cv.notify_all();
+            }
         } else if (is_start_resp) {
             if (response == 0) {
+                std::vector<MonitorInfo> detectedMonitors;
+                if (results) {
+                    GVariant* streams_v = g_variant_lookup_value(results, "streams", G_VARIANT_TYPE("a(ua{sv})"));
+                    if (streams_v) {
+                        GVariantIter stream_iter;
+                        g_variant_iter_init(&stream_iter, streams_v);
+                        GVariant* stream_tuple = nullptr;
+                        int monitorPos = 0;
+
+                        while ((stream_tuple = g_variant_iter_next_value(&stream_iter)) != nullptr) {
+                            guint32 node_id = 0;
+                            GVariant* props = nullptr;
+                            g_variant_get(stream_tuple, "(u@a{sv})", &node_id, &props);
+
+                            MonitorInfo monitor;
+                            monitor.index = monitorPos++;
+                            monitor.id = std::to_string(node_id);
+                            monitor.name = "Portal stream " + monitor.id;
+                            monitor.primary = detectedMonitors.empty();
+
+                            if (props) {
+                                GVariant* title_v = g_variant_lookup_value(props, "title", G_VARIANT_TYPE_STRING);
+                                if (title_v) {
+                                    const gchar* title = g_variant_get_string(title_v, nullptr);
+                                    if (title && *title) {
+                                        monitor.name = title;
+                                    }
+                                    g_variant_unref(title_v);
+                                }
+
+                                GVariant* connector_v = g_variant_lookup_value(props, "connector", G_VARIANT_TYPE_STRING);
+                                if (connector_v) {
+                                    const gchar* connector = g_variant_get_string(connector_v, nullptr);
+                                    if (connector && *connector) {
+                                        monitor.name = connector;
+                                    }
+                                    g_variant_unref(connector_v);
+                                }
+
+                                GVariant* size_v = g_variant_lookup_value(props, "size", G_VARIANT_TYPE("(ii)"));
+                                if (size_v) {
+                                    int32_t width = 0;
+                                    int32_t height = 0;
+                                    g_variant_get(size_v, "(ii)", &width, &height);
+                                    monitor.width = std::max(1, width);
+                                    monitor.height = std::max(1, height);
+                                    g_variant_unref(size_v);
+                                }
+
+                                GVariant* pos_v = g_variant_lookup_value(props, "position", G_VARIANT_TYPE("(ii)"));
+                                if (pos_v) {
+                                    int32_t x = 0;
+                                    int32_t y = 0;
+                                    g_variant_get(pos_v, "(ii)", &x, &y);
+                                    monitor.x = x;
+                                    monitor.y = y;
+                                    g_variant_unref(pos_v);
+                                }
+
+                                g_variant_unref(props);
+                            }
+
+                            detectedMonitors.push_back(std::move(monitor));
+                            g_variant_unref(stream_tuple);
+                        }
+                        g_variant_unref(streams_v);
+                    }
+                }
+
+                if (!detectedMonitors.empty()) {
+                    std::lock_guard<std::mutex> lock(self->m_monitorMutex);
+                    self->m_monitors = std::move(detectedMonitors);
+                    self->m_currentMonitorIndex = std::stoi(self->m_monitors.front().id);
+                    self->UpdateVirtualDesktopBounds();
+                }
+
                 std::cout << "RemoteDesktop session successfully STARTed! Ready for input injection." << std::endl;
                 self->is_session_ready.store(true);
                 if (self->input_mode == InputMode::EIS) {
@@ -1286,6 +1379,47 @@ class PlatformInputLinux : public IPlatformInput {
         }
 
         if (result) {
+            g_variant_unref(result);
+        }
+    }
+
+    static void SelectSources(PlatformInputLinux* self) {
+        GError* error = nullptr;
+        const std::string session_handle = self->GetSessionHandle();
+        std::cout << "Calling ScreenCast.SelectSources on session " << session_handle << "..." << std::endl;
+
+        GVariantBuilder builder;
+        g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
+        g_variant_builder_add(&builder, "{sv}", "types", g_variant_new_uint32(1));
+        g_variant_builder_add(&builder, "{sv}", "multiple", g_variant_new_boolean(TRUE));
+        g_variant_builder_add(&builder, "{sv}", "cursor_mode", g_variant_new_uint32(2));
+        g_variant_builder_add(&builder, "{sv}", "handle_token", g_variant_new_string("sourcesReq"));
+
+        GVariant* result = g_dbus_connection_call_sync(
+            self->connection,
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.ScreenCast",
+            "SelectSources",
+            g_variant_new("(o@a{sv})", session_handle.c_str(), g_variant_builder_end(&builder)),
+            G_VARIANT_TYPE("(o)"),
+            G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            nullptr,
+            &error
+        );
+
+        if (error) {
+            std::cerr << "Failed to SelectSources: " << error->message << std::endl;
+            g_error_free(error);
+            self->session_cv.notify_all();
+            return;
+        }
+
+        if (result) {
+            const gchar* request_path = nullptr;
+            g_variant_get(result, "(&o)", &request_path);
+            std::cout << "SelectSources requested. Request path: " << (request_path ? request_path : "null") << std::endl;
             g_variant_unref(result);
         }
     }
@@ -1469,6 +1603,62 @@ class PlatformInputLinux : public IPlatformInput {
         }
     }
 
+    std::optional<int> OpenPipeWireRemoteFd(std::string& error_msg) override {
+        if (!is_session_ready.load(std::memory_order_relaxed)) {
+            error_msg = "Session is not ready. Call init() and wait for portal authorization first.";
+            return std::nullopt;
+        }
+
+        const std::string current_session = GetSessionHandle();
+        if (current_session.empty()) {
+            error_msg = "RemoteDesktop session handle is empty.";
+            return std::nullopt;
+        }
+
+        GVariantBuilder options_builder;
+        g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
+
+        GError* error = nullptr;
+        GUnixFDList* out_fd_list = nullptr;
+        GVariant* result = g_dbus_connection_call_with_unix_fd_list_sync(
+            connection,
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.ScreenCast",
+            "OpenPipeWireRemote",
+            g_variant_new("(o@a{sv})", current_session.c_str(), g_variant_builder_end(&options_builder)),
+            G_VARIANT_TYPE("(h)"),
+            G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            nullptr,
+            &out_fd_list,
+            nullptr,
+            &error
+        );
+
+        if (error) {
+            error_msg = std::string("OpenPipeWireRemote failed: ") + error->message;
+            g_error_free(error);
+            if (out_fd_list) g_object_unref(out_fd_list);
+            if (result) g_variant_unref(result);
+            return std::nullopt;
+        }
+
+        gint handle_index = -1;
+        g_variant_get(result, "(h)", &handle_index);
+        int fd = g_unix_fd_list_get(out_fd_list, handle_index, nullptr);
+
+        if (result) g_variant_unref(result);
+        if (out_fd_list) g_object_unref(out_fd_list);
+
+        if (fd < 0) {
+            error_msg = "OpenPipeWireRemote did not return a valid fd.";
+            return std::nullopt;
+        }
+
+        return fd;
+    }
+
     void MoveMouseRelative(int32_t x, int32_t y) override {
         if (!is_session_ready) return;
 #if INPUT_BRIDGE_HAS_LIBEI
@@ -1549,8 +1739,15 @@ class PlatformInputLinux : public IPlatformInput {
         if (monitor.width <= 0 || monitor.height <= 0) return;
 
         // Przyjmujemy wejściowe x i y jako piksele logiczne [0..width/height]
-        double localX = std::max(0.0, std::min(static_cast<double>(x), static_cast<double>(monitor.width - 1)));
-        double localY = std::max(0.0, std::min(static_cast<double>(y), static_cast<double>(monitor.height - 1)));
+        // double localX = std::max(0.0, std::min(static_cast<double>(x), static_cast<double>(monitor.width - 1)));
+        // double localY = std::max(0.0, std::min(static_cast<double>(y), static_cast<double>(monitor.height - 1)));
+        
+        // double localX = x;
+        // double localY = y;
+        double localX = (double)x / (double)monitor.width;
+        double localY = (double)y / (double)monitor.height;
+
+
 
         // Faktyczny PipeWire Stream ID znajduje się w monitor.id (string). 
         // monitor.index to tylko pozycja w tablicy.

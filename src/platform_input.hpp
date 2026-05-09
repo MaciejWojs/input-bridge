@@ -99,6 +99,19 @@ class IPlatformInput {
         return false;
     }
 
+    // Linux portal session helpers for inter-addon integration.
+    // Default: unavailable on non-Linux backends.
+    virtual std::optional<std::string> GetPortalSessionHandle() {
+        return std::nullopt;
+    }
+
+    // Opens PipeWire remote fd for active portal session.
+    // Returned fd ownership is transferred to caller.
+    virtual std::optional<int> OpenPipeWireRemoteFd(std::string& error_msg) {
+        (void)error_msg;
+        return std::nullopt;
+    }
+
     // Clipboard API
     // Sets text to clipboard. Returns true on success.
     virtual bool SetClipboardText(const std::string& text) = 0;

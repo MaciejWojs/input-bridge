@@ -141,6 +141,18 @@ export interface IInputBridge {
     isEISConnected(): boolean;
 
     /**
+     * Returns active Linux portal session handle (object path) when available.
+     * Useful for integrations with other native Node addons.
+     */
+    getPortalSessionHandle(): string | null;
+
+    /**
+     * Opens PipeWire remote for the current portal session and returns OS fd.
+     * Caller owns returned fd lifecycle.
+     */
+    openPipeWireRemoteFd(): number | null;
+
+    /**
      * Sets the clipboard text (Unicode string).
      *
      * @param text - The text to set to the clipboard.
@@ -607,6 +619,14 @@ export class InputBridge implements IInputBridge {
 
     isEISConnected(): boolean {
         return this.nativeBridge.isEISConnected();
+    }
+
+    getPortalSessionHandle(): string | null {
+        return this.nativeBridge.getPortalSessionHandle();
+    }
+
+    openPipeWireRemoteFd(): number | null {
+        return this.nativeBridge.openPipeWireRemoteFd();
     }
 
     moveMouseRelative(x: number, y: number): void {

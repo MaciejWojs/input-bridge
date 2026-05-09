@@ -106,7 +106,9 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
             InstanceMethod("getBackendMethods", &InputBridge::GetBackendMethods),
             InstanceMethod("connectToEIS", &InputBridge::ConnectToEIS),
             InstanceMethod("disconnectEIS", &InputBridge::DisconnectEIS),
-            InstanceMethod("isEISConnected", &InputBridge::IsEISConnected)
+            InstanceMethod("isEISConnected", &InputBridge::IsEISConnected),
+            InstanceMethod("getPortalSessionHandle", &InputBridge::GetPortalSessionHandle),
+            InstanceMethod("openPipeWireRemoteFd", &InputBridge::OpenPipeWireRemoteFd)
             });
 
         auto* constructor = new Napi::FunctionReference();
@@ -294,6 +296,25 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
 
     Napi::Value IsEISConnected(const Napi::CallbackInfo& info) {
         return Napi::Boolean::New(info.Env(), m_queue.GetPlatform()->IsEISConnected());
+    }
+
+    Napi::Value GetPortalSessionHandle(const Napi::CallbackInfo& info) {
+        auto session = m_queue.GetPlatform()->GetPortalSessionHandle();
+        if (!session) return info.Env().Null();
+        return Napi::String::New(info.Env(), *session);
+    }
+
+    Napi::Value OpenPipeWireRemoteFd(const Napi::CallbackInfo& info) {
+        std::string error_msg;
+        auto fd = m_queue.GetPlatform()->OpenPipeWireRemoteFd(error_msg);
+        if (!fd) {
+            if (!error_msg.empty()) {
+                Napi::Error::New(info.Env(), error_msg).ThrowAsJavaScriptException();
+                return info.Env().Undefined();
+            }
+            return info.Env().Null();
+        }
+        return Napi::Number::New(info.Env(), *fd);
     }
 
     class InitWorker : public Napi::AsyncWorker {
