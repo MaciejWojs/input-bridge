@@ -4,6 +4,7 @@
 #include <string>
 #include <sstream>
 #include <cstdio>
+#include <cstdlib>
 #include <cerrno>
 #include <cstring>
 #include <gio/gio.h>
@@ -1540,63 +1541,50 @@ class PlatformInputLinux : public IPlatformInput {
     void MoveMouseAbsolute(int32_t x, int32_t y) override {
         if (!is_session_ready) return;
 
-        int32_t stream_w, stream_h;
-        int32_t monitorIndex;
+        MonitorInfo monitor;
         {
             std::lock_guard<std::mutex> lock(m_monitorMutex);
-            const MonitorInfo& monitor = GetCurrentMonitor();
-            stream_w = monitor.width > 0 ? monitor.width : 1;
-            stream_h = monitor.height > 0 ? monitor.height : 1;
-            monitorIndex = m_currentMonitorIndex;
+            monitor = GetCurrentMonitor();
         }
 
-        // Zakładamy, że x,y to współrzędne LOCALNE względem lewego górnego rogu aktywnego monitora
-        // (nie odejmujemy offsetu monitora - to, co dostarcza kontroler, jest już lokalne)
-        int32_t localX = std::clamp(x, 0, stream_w - 1);
-        int32_t localY = std::clamp(y, 0, stream_h - 1);
-
-        // LOGOWANIE DIAGNOSTYCZNE
-        std::cout << "[DEBUG MoveAbsolute] incoming x=" << x << " y=" << y
-                  << " localX=" << localX << " localY=" << localY
-                  << " monitorIdx=" << monitorIndex
-                  << " stream " << stream_w << "x" << stream_h
-                  << std::endl;
-
-        // Sprawdzenie, czy współrzędne są w zakresie monitora
-        if (localX < 0 || localX >= stream_w || localY < 0 || localY >= stream_h) {
-            std::cerr << "[WARN] Coordinates out of stream bounds: "
-                      << localX << "," << localY << std::endl;
+        // Jeśli wymiary są nieznane, nie możemy znormalizować współrzędnych (unikamy Invalid position)
+        if (monitor.width <= 0 || monitor.height <= 0) {
+            return;
         }
+
+        // Kontrakt API: x, y są lokalne dla wybranego monitora.
+        // Portal RemoteDesktop oczekuje współrzędnych [0.0, 1.0] relatywnych do strumienia (monitora).
+        double normX = std::clamp(static_cast<double>(x) / static_cast<double>(monitor.width), 0.0, 0.9999);
+        double normY = std::clamp(static_cast<double>(y) / static_cast<double>(monitor.height), 0.0, 0.9999);
+
+        // Używamy monitor.index jako streamIndex. W Twoich logach:
+        // Monitor 0 (id=149) -> streamIndex 0
+        // Monitor 1 (id=206) -> streamIndex 1
+        uint32_t streamIndex = static_cast<uint32_t>(monitor.index);
 
 #if INPUT_BRIDGE_HAS_LIBEI
         if (eis_connected.load(std::memory_order_relaxed)) {
             EISDispatchPending();
             if (HasEISDevice()) {
-                // libei – współrzędne absolutne w pikselach
-                SendEISAbsoluteMotion(static_cast<double>(localX), static_cast<double>(localY));
+                // EIS zazwyczaj operuje na pikselach lokalnych urządzenia
+                SendEISAbsoluteMotion(static_cast<double>(x), static_cast<double>(y));
                 return;
             }
         }
 #endif
 
-        const std::string session_handle = GetSessionHandle();
+        if (!allow_notify_pointer) return;
+
+        const std::string session_handle_str = GetSessionHandle();
         GVariantBuilder options_builder;
         g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
 
-        // Użyj rzeczywistego indeksu strumienia zamiast sztywnego 0u
-        const uint32_t streamIndex = static_cast<uint32_t>(monitorIndex);
-
-        // Oblicz ruch względny (różnica między aktualnymi a poprzednimi współrzędnymi)
-        int32_t deltaX = localX - m_lastX;
-        int32_t deltaY = localY - m_lastY;
-
-        // Zaktualizuj lastX i lastY dla kolejnego wywołania
-        m_lastX = localX;
-        m_lastY = localY;
-
-        // Znormalizuj ruch względny do zakresu 0..1
-        double normDeltaX = static_cast<double>(deltaX) / stream_w;
-        double normDeltaY = static_cast<double>(deltaY) / stream_h;
+        GVariant* parameters = g_variant_new("(o@a{sv}udd)", 
+                                            session_handle_str.c_str(), 
+                                            g_variant_builder_end(&options_builder), 
+                                            streamIndex, 
+                                            normX, 
+                                            normY);
 
         if (m_batchMode) {
             GError* error = nullptr;
@@ -1605,22 +1593,14 @@ class PlatformInputLinux : public IPlatformInput {
                 "org.freedesktop.portal.Desktop",
                 "/org/freedesktop/portal/desktop",
                 "org.freedesktop.portal.RemoteDesktop",
-                "NotifyPointerMotion",
-                g_variant_new("(o@a{sv}dd)", session_handle.c_str(),
-                              g_variant_builder_end(&options_builder),
-                              normDeltaX, normDeltaY),
-                nullptr,
-                G_DBUS_CALL_FLAGS_NONE,
-                -1,
-                nullptr,
-                &error
+                "NotifyPointerMotionAbsolute",
+                parameters,
+                nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &error
             );
 
             if (error) {
-                std::cerr << "Failed to send NotifyPointerMotion: " << error->message
-                          << " (delta: " << deltaX << "," << deltaY
-                          << " normalized: " << normDeltaX << "," << normDeltaY
-                          << " on stream " << stream_w << "x" << stream_h << ")" << std::endl;
+                std::cerr << "Failed to send NotifyPointerMotionAbsolute: " << error->message 
+                          << " (pos: " << normX << "," << normY << " stream: " << streamIndex << ")" << std::endl;
                 g_error_free(error);
             }
             if (result) g_variant_unref(result);
@@ -1632,16 +1612,9 @@ class PlatformInputLinux : public IPlatformInput {
             "org.freedesktop.portal.Desktop",
             "/org/freedesktop/portal/desktop",
             "org.freedesktop.portal.RemoteDesktop",
-            "NotifyPointerMotion",
-            g_variant_new("(o@a{sv}dd)", session_handle.c_str(),
-                          g_variant_builder_end(&options_builder),
-                          normDeltaX, normDeltaY),
-            nullptr,
-            G_DBUS_CALL_FLAGS_NONE,
-            -1,
-            nullptr,
-            nullptr,
-            nullptr
+            "NotifyPointerMotionAbsolute",
+            parameters,
+            nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr, nullptr
         );
     }
 
@@ -1660,7 +1633,7 @@ class PlatformInputLinux : public IPlatformInput {
         std::cout << "Monitors updated. Virtual Desktop: " << m_virtWidth << "x" << m_virtHeight 
                   << " starting at (" << m_virtMinX << "," << m_virtMinY << ")" << std::endl;
         for (const auto& m : monitors) {
-            std::cout << "  [" << m.index << "] " << m.name << " " << m.width << "x" << m.height << " at (" << m.x << "," << m.y << ")" << (m.primary ? " [PRIMARY]" : "") << std::endl;
+            std::cout << "  [" << m.index << "] id=" << m.id << " name=" << m.name << " " << m.width << "x" << m.height << " at (" << m.x << "," << m.y << ")" << (m.primary ? " [PRIMARY]" : "") << std::endl;
         }
     }
 
