@@ -1228,15 +1228,15 @@ class PlatformInputLinux : public IPlatformInput {
                                 std::lock_guard<std::mutex> lock(self->session_mutex);
                                 self->session_handle = session_handle_str;
                             }
-                            // Issue RequestClipboard before any other portal request so the
-                            // clipboard prompt is the first one queued, which lets backends
-                            // such as Mutter/KWin merge it into the upcoming permission UI.
+                            // On this portal backend RequestClipboard before SelectDevices
+                            // returns "Invalid state", so the default flow starts with
+                            // SelectDevices and requests clipboard right after that.
                             if (self->m_portalParallelInit) {
                                 self->m_pendingFirstStageReplies.store(2, std::memory_order_relaxed);
                                 RequestClipboard(self);
                                 SelectDevices(self);
                             } else {
-                                RequestClipboard(self);
+                                SelectDevices(self);
                             }
                         } else {
                             std::cerr << "Portal response session_handle string was null." << std::endl;
@@ -1266,7 +1266,7 @@ class PlatformInputLinux : public IPlatformInput {
                 if (self->m_portalParallelInit) {
                     OnFirstStageReply(self);
                 } else {
-                    SelectSources(self);
+                    RequestClipboard(self);
                 }
             } else {
                 std::cerr << "SelectDevices denied. Response: " << response << std::endl;
@@ -1510,7 +1510,7 @@ class PlatformInputLinux : public IPlatformInput {
         if (self->m_portalParallelInit) {
             OnFirstStageReply(self);
         } else {
-            SelectDevices(self);
+            SelectSources(self);
         }
     }
 
