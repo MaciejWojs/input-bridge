@@ -1237,7 +1237,7 @@ class PlatformInputLinux : public IPlatformInput {
                                 RequestClipboard(self);
                                 SelectDevices(self);
                             } else {
-                                SelectDevices(self);
+                                RequestClipboard(self);
                             }
                         } else {
                             std::cerr << "Portal response session_handle string was null." << std::endl;
@@ -1276,7 +1276,7 @@ class PlatformInputLinux : public IPlatformInput {
         } else if (is_sources_resp) {
             if (response == 0) {
                 std::cout << "ScreenCast.SelectSources completed successfully." << std::endl;
-                RequestClipboard(self);
+                StartSession(self);
             } else {
                 std::cerr << "Screen capture permission denied. Response: " << response << std::endl;
                 self->session_cv.notify_all();
@@ -1516,7 +1516,7 @@ class PlatformInputLinux : public IPlatformInput {
         if (self->m_portalParallelInit) {
             OnFirstStageReply(self);
         } else {
-            StartSession(self);
+            SelectDevices(self);
         }
     }
 
@@ -1686,7 +1686,7 @@ class PlatformInputLinux : public IPlatformInput {
         std::cout << "Portal init mode: "
                   << (m_portalParallelInit
                         ? "parallel (RequestClipboard + SelectDevices issued together)"
-                        : "sequential (SelectDevices then SelectSources then RequestClipboard)")
+                        : "sequential (RequestClipboard then SelectDevices then SelectSources)")
                   << std::endl;
 
         // Parameters for CreateSession (e.g. token so we know the Request ID)
