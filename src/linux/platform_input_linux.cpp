@@ -1150,23 +1150,24 @@ class PlatformInputLinux : public IPlatformInput {
         } else if (is_clipboard_resp) {
             if (response == 0) {
                 std::cout << "Clipboard access granted." << std::endl;
-                self->clipboard_signal_id = g_dbus_connection_signal_subscribe(
-                    self->connection,
-                    "org.freedesktop.portal.Desktop",
-                    "org.freedesktop.portal.Clipboard",
-                    "SelectionTransfer",
-                    "/org/freedesktop/portal/desktop",
-                    nullptr,
-                    G_DBUS_SIGNAL_FLAGS_NONE,
-                    OnClipboardSelectionTransfer,
-                    self,
-                    nullptr
-                );
-                StartSession(self);
+                if (self->clipboard_signal_id == 0) {
+                    self->clipboard_signal_id = g_dbus_connection_signal_subscribe(
+                        self->connection,
+                        "org.freedesktop.portal.Desktop",
+                        "org.freedesktop.portal.Clipboard",
+                        "SelectionTransfer",
+                        "/org/freedesktop/portal/desktop",
+                        nullptr,
+                        G_DBUS_SIGNAL_FLAGS_NONE,
+                        OnClipboardSelectionTransfer,
+                        self,
+                        nullptr
+                    );
+                }
             } else {
                 std::cerr << "Clipboard access denied. Continuing without clipboard. Response: " << response << std::endl;
-                self->session_cv.notify_all();
             }
+            StartSession(self);
         } else if (is_select_resp) {
             if (response == 0) {
                 std::cout << "SelectDevices completed successfully." << std::endl;
@@ -1351,21 +1352,10 @@ class PlatformInputLinux : public IPlatformInput {
         if (error) {
             std::cerr << "Failed to RequestClipboard: " << error->message << std::endl;
             g_error_free(error);
+            // Jeśli żądanie schowka nie powiodło się, kontynuujemy uruchamianie sesji,
+            // aby przynajmniej obsługa myszy i klawiatury działała poprawnie.
+            StartSession(self);
         } else {
-            if (self->clipboard_signal_id == 0) {
-                self->clipboard_signal_id = g_dbus_connection_signal_subscribe(
-                    self->connection,
-                    "org.freedesktop.portal.Desktop",
-                    "org.freedesktop.portal.Clipboard",
-                    "SelectionTransfer",
-                    "/org/freedesktop/portal/desktop",
-                    nullptr,
-                    G_DBUS_SIGNAL_FLAGS_NONE,
-                    OnClipboardSelectionTransfer,
-                    self,
-                    nullptr
-                );
-            }
             if (result && g_variant_is_of_type(result, G_VARIANT_TYPE("(o)")) && g_variant_n_children(result) == 1) {
                 const gchar* request_path = nullptr;
                 g_variant_get(result, "(&o)", &request_path);
@@ -1373,9 +1363,6 @@ class PlatformInputLinux : public IPlatformInput {
             } else {
                 std::cout << "RequestClipboard completed successfully." << std::endl;
             }
-
-            std::cout << "RequestClipboard finished, starting remote desktop session now..." << std::endl;
-            StartSession(self);
         }
 
         if (result) {
