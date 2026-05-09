@@ -263,8 +263,49 @@ class PlatformInputLinux : public IPlatformInput {
     InputEventCallback m_inputCallback;
     std::mutex input_callback_mutex;
 
+    // Set when RequestClipboard returns a successful Response (response==0).
+    // The portal Clipboard interface allows clipboard ops only after the session
+    // has been started, but only if clipboard access was granted in the meantime.
+    std::atomic<bool> m_clipboardAccessGranted{ false };
+    // Authoritative clipboard state, updated from RemoteDesktop.Start response
+    // ('clipboard_enabled' key, since RemoteDesktop interface v2). For older
+    // portals where the key is missing we fall back to m_clipboardAccessGranted.
+    std::atomic<bool> m_clipboardEnabled{ false };
+    bool m_clipboardEnabledKnown = false;
+    unsigned int m_remoteDesktopVersion = 0;
+    unsigned int m_clipboardVersion = 0;
+    // Optional fallback: issue RequestClipboard and SelectDevices in parallel
+    // right after CreateSession completes, then run SelectSources only after
+    // both responses arrive. Toggled via the INPUT_BRIDGE_PORTAL_PARALLEL env
+    // variable for environments where the merged dialog needs both pending
+    // requests at the same time to render the clipboard switch.
+    bool m_portalParallelInit = false;
+    std::atomic<int> m_pendingFirstStageReplies{ 0 };
+
+    bool ClipboardAvailable() const {
+        if (!is_session_ready.load(std::memory_order_relaxed)) return false;
+        if (m_clipboardEnabledKnown) {
+            return m_clipboardEnabled.load(std::memory_order_relaxed);
+        }
+        return m_clipboardAccessGranted.load(std::memory_order_relaxed);
+    }
+
+    void LogClipboardUnavailable(const char* op) const {
+        std::cerr << "Clipboard portal not enabled for this session ("
+                  << op << " ignored). RequestClipboard granted="
+                  << (m_clipboardAccessGranted.load(std::memory_order_relaxed) ? "true" : "false")
+                  << ", Start.clipboard_enabled="
+                  << (m_clipboardEnabledKnown
+                        ? (m_clipboardEnabled.load(std::memory_order_relaxed) ? "true" : "false")
+                        : "missing")
+                  << "." << std::endl;
+    }
+
     bool SetClipboardText(const std::string& text) override {
-        if (!is_session_ready) return false;
+        if (!ClipboardAvailable()) {
+            LogClipboardUnavailable("SetClipboardText");
+            return false;
+        }
 
         const std::string session_handle = GetSessionHandle();
         {
@@ -307,7 +348,10 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     std::optional<std::string> GetClipboardText() override {
-        if (!is_session_ready) return std::nullopt;
+        if (!ClipboardAvailable()) {
+            LogClipboardUnavailable("GetClipboardText");
+            return std::nullopt;
+        }
 
         const std::string session_handle = GetSessionHandle();
         GError* error = nullptr;
@@ -355,7 +399,10 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     bool SetClipboardFiles(const std::vector<std::string>& files) override {
-        if (!is_session_ready) return false;
+        if (!ClipboardAvailable()) {
+            LogClipboardUnavailable("SetClipboardFiles");
+            return false;
+        }
 
         const std::string session_handle = GetSessionHandle();
         std::string payload;
@@ -403,7 +450,10 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     std::optional<std::vector<std::string>> GetClipboardFiles() override {
-        if (!is_session_ready) return std::nullopt;
+        if (!ClipboardAvailable()) {
+            LogClipboardUnavailable("GetClipboardFiles");
+            return std::nullopt;
+        }
 
         const std::string session_handle = GetSessionHandle();
         GError* error = nullptr;
@@ -1075,6 +1125,52 @@ class PlatformInputLinux : public IPlatformInput {
         );
     }
 
+    // Counts down responses to the first stage of parallel portal initialization
+    // (RequestClipboard + SelectDevices). When both have completed we proceed to
+    // SelectSources. Used only when m_portalParallelInit is true.
+    static void OnFirstStageReply(PlatformInputLinux* self) {
+        const int remaining = self->m_pendingFirstStageReplies.fetch_sub(1, std::memory_order_acq_rel) - 1;
+        if (remaining <= 0) {
+            SelectSources(self);
+        }
+    }
+
+    static unsigned int QueryPortalVersion(GDBusConnection* conn, const char* iface) {
+        if (!conn || !iface) return 0;
+        GError* error = nullptr;
+        GVariant* result = g_dbus_connection_call_sync(
+            conn,
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.DBus.Properties",
+            "Get",
+            g_variant_new("(ss)", iface, "version"),
+            G_VARIANT_TYPE("(v)"),
+            G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            nullptr,
+            &error
+        );
+        if (error) {
+            std::cerr << "Failed to read " << iface << " version: " << error->message << std::endl;
+            g_error_free(error);
+            return 0;
+        }
+        unsigned int version = 0;
+        if (result) {
+            GVariant* inner = nullptr;
+            g_variant_get(result, "(v)", &inner);
+            if (inner) {
+                if (g_variant_is_of_type(inner, G_VARIANT_TYPE_UINT32)) {
+                    version = g_variant_get_uint32(inner);
+                }
+                g_variant_unref(inner);
+            }
+            g_variant_unref(result);
+        }
+        return version;
+    }
+
     static void OnPortalResponse(GDBusConnection* connection, const gchar* sender_name,
         const gchar* object_path, const gchar* interface_name,
         const gchar* signal_name, GVariant* parameters, gpointer user_data) {
@@ -1132,7 +1228,16 @@ class PlatformInputLinux : public IPlatformInput {
                                 std::lock_guard<std::mutex> lock(self->session_mutex);
                                 self->session_handle = session_handle_str;
                             }
-                            SelectDevices(self);
+                            // Issue RequestClipboard before any other portal request so the
+                            // clipboard prompt is the first one queued, which lets backends
+                            // such as Mutter/KWin merge it into the upcoming permission UI.
+                            if (self->m_portalParallelInit) {
+                                self->m_pendingFirstStageReplies.store(2, std::memory_order_relaxed);
+                                RequestClipboard(self);
+                                SelectDevices(self);
+                            } else {
+                                RequestClipboard(self);
+                            }
                         } else {
                             std::cerr << "Portal response session_handle string was null." << std::endl;
                             self->session_cv.notify_all();
@@ -1148,34 +1253,21 @@ class PlatformInputLinux : public IPlatformInput {
                 self->session_cv.notify_all();
             }
         } else if (is_clipboard_resp) {
-            if (response == 0) {
-                std::cout << "Clipboard access granted." << std::endl;
-                if (self->clipboard_signal_id == 0) {
-                    self->clipboard_signal_id = g_dbus_connection_signal_subscribe(
-                        self->connection,
-                        "org.freedesktop.portal.Desktop",
-                        "org.freedesktop.portal.Clipboard",
-                        "SelectionTransfer",
-                        "/org/freedesktop/portal/desktop",
-                        nullptr,
-                        G_DBUS_SIGNAL_FLAGS_NONE,
-                        OnClipboardSelectionTransfer,
-                        self,
-                        nullptr
-                    );
-                }
-            } else {
-                std::cerr << "Clipboard access denied. Continuing without clipboard. Response: " << response << std::endl;
-            }
-            SelectSources(self);
+            // The org.freedesktop.portal.Clipboard.RequestClipboard method does
+            // not return a Request handle, so per the spec this Response signal
+            // never fires. We keep this branch only as a defensive log in case a
+            // backend implementation diverges from the spec; advancing the chain
+            // is handled synchronously inside RequestClipboard().
+            std::cout << "Unexpected clipboardReq Response (response=" << response
+                      << "); RequestClipboard normally completes synchronously." << std::endl;
         } else if (is_select_resp) {
             if (response == 0) {
                 std::cout << "SelectDevices completed successfully." << std::endl;
-                // RequestClipboard before SelectSources so the portal can show clipboard
-                // in the same permission flow as screens (see org.freedesktop.portal.Clipboard:
-                // RequestClipboard must run before the session starts; ordering vs screencast
-                // matters for merged dialogs on GNOME/KDE).
-                RequestClipboard(self);
+                if (self->m_portalParallelInit) {
+                    OnFirstStageReply(self);
+                } else {
+                    SelectSources(self);
+                }
             } else {
                 std::cerr << "SelectDevices denied. Response: " << response << std::endl;
                 self->session_cv.notify_all();
@@ -1192,6 +1284,36 @@ class PlatformInputLinux : public IPlatformInput {
             if (response == 0) {
                 std::vector<MonitorInfo> detectedMonitors;
                 if (results) {
+                    // RemoteDesktop v2 reports the user's clipboard decision and the
+                    // negotiated device bitmask in the Start response. Parsing both
+                    // gives us a definitive picture of what the portal allowed.
+                    GVariant* clipboard_v = g_variant_lookup_value(results, "clipboard_enabled", G_VARIANT_TYPE_BOOLEAN);
+                    if (clipboard_v) {
+                        const gboolean enabled = g_variant_get_boolean(clipboard_v);
+                        self->m_clipboardEnabled.store(enabled == TRUE, std::memory_order_relaxed);
+                        self->m_clipboardEnabledKnown = true;
+                        std::cout << "Start: clipboard_enabled=" << (enabled ? "true" : "false") << std::endl;
+                        g_variant_unref(clipboard_v);
+                    } else {
+                        self->m_clipboardEnabledKnown = false;
+                        const bool granted = self->m_clipboardAccessGranted.load(std::memory_order_relaxed);
+                        self->m_clipboardEnabled.store(granted, std::memory_order_relaxed);
+                        std::cout << "Start: clipboard_enabled key missing (legacy portal); falling back to RequestClipboard grant="
+                                  << (granted ? "true" : "false") << std::endl;
+                    }
+
+                    GVariant* devices_v = g_variant_lookup_value(results, "devices", G_VARIANT_TYPE_UINT32);
+                    if (devices_v) {
+                        const guint32 mask = g_variant_get_uint32(devices_v);
+                        std::cout << "Start: devices bitmask=0x" << std::hex << mask << std::dec
+                                  << " (keyboard=" << ((mask & 1u) ? "y" : "n")
+                                  << " pointer=" << ((mask & 2u) ? "y" : "n")
+                                  << " touchscreen=" << ((mask & 4u) ? "y" : "n") << ")" << std::endl;
+                        g_variant_unref(devices_v);
+                    } else {
+                        std::cout << "Start: devices key missing in response." << std::endl;
+                    }
+
                     GVariant* streams_v = g_variant_lookup_value(results, "streams", G_VARIANT_TYPE("a(ua{sv})"));
                     if (streams_v) {
                         GVariantIter stream_iter;
@@ -1356,20 +1478,39 @@ class PlatformInputLinux : public IPlatformInput {
         if (error) {
             std::cerr << "Failed to RequestClipboard: " << error->message << std::endl;
             g_error_free(error);
-            // Clipboard portal unavailable; continue with screen selection then Start.
-            SelectSources(self);
+            self->m_clipboardAccessGranted.store(false, std::memory_order_relaxed);
         } else {
-            if (result && g_variant_is_of_type(result, G_VARIANT_TYPE("(o)")) && g_variant_n_children(result) == 1) {
-                const gchar* request_path = nullptr;
-                g_variant_get(result, "(&o)", &request_path);
-                std::cout << "RequestClipboard returned request path: " << (request_path ? request_path : "null") << std::endl;
-            } else {
-                std::cout << "RequestClipboard completed successfully." << std::endl;
+            // RequestClipboard has no OUT handle in the spec, so we expect an
+            // empty tuple here. Treat completion as the access grant signal and
+            // subscribe to SelectionTransfer before the session starts.
+            self->m_clipboardAccessGranted.store(true, std::memory_order_relaxed);
+            std::cout << "RequestClipboard completed successfully." << std::endl;
+            if (self->clipboard_signal_id == 0) {
+                self->clipboard_signal_id = g_dbus_connection_signal_subscribe(
+                    self->connection,
+                    "org.freedesktop.portal.Desktop",
+                    "org.freedesktop.portal.Clipboard",
+                    "SelectionTransfer",
+                    "/org/freedesktop/portal/desktop",
+                    nullptr,
+                    G_DBUS_SIGNAL_FLAGS_NONE,
+                    OnClipboardSelectionTransfer,
+                    self,
+                    nullptr
+                );
             }
         }
 
         if (result) {
             g_variant_unref(result);
+        }
+
+        // Advance the chain from the synchronous return: RequestClipboard does
+        // not emit a Response signal, so we cannot wait on OnPortalResponse.
+        if (self->m_portalParallelInit) {
+            OnFirstStageReply(self);
+        } else {
+            SelectDevices(self);
         }
     }
 
@@ -1450,7 +1591,11 @@ class PlatformInputLinux : public IPlatformInput {
         if (error) {
             std::cerr << "Failed to SelectDevices: " << error->message << std::endl;
             g_error_free(error);
-            self->session_cv.notify_all();
+            if (self->m_portalParallelInit) {
+                OnFirstStageReply(self);
+            } else {
+                self->session_cv.notify_all();
+            }
         } else if (result) {
             if (g_variant_is_of_type(result, G_VARIANT_TYPE("(o)")) && g_variant_n_children(result) == 1) {
                 const gchar* request_path = nullptr;
@@ -1486,6 +1631,19 @@ class PlatformInputLinux : public IPlatformInput {
 
             std::cout << "Successfully connected to D-Bus session bus." << std::endl;
 
+            this->m_remoteDesktopVersion = QueryPortalVersion(this->connection, "org.freedesktop.portal.RemoteDesktop");
+            this->m_clipboardVersion = QueryPortalVersion(this->connection, "org.freedesktop.portal.Clipboard");
+            std::cout << "Portal versions: RemoteDesktop=" << this->m_remoteDesktopVersion
+                      << " Clipboard=" << this->m_clipboardVersion << std::endl;
+            if (this->m_remoteDesktopVersion < 2) {
+                std::cerr << "Warning: org.freedesktop.portal.RemoteDesktop version < 2; "
+                          << "clipboard_enabled flag and ConnectToEIS will be unavailable." << std::endl;
+            }
+            if (this->m_clipboardVersion == 0) {
+                std::cerr << "Warning: org.freedesktop.portal.Clipboard not available; "
+                          << "clipboard switch will not appear in the portal dialog." << std::endl;
+            }
+
             this->response_signal_id = g_dbus_connection_signal_subscribe(
                 this->connection,
                 "org.freedesktop.portal.Desktop",
@@ -1514,6 +1672,16 @@ class PlatformInputLinux : public IPlatformInput {
         }
 
         is_running = true;
+
+        if (const char* parallel = std::getenv("INPUT_BRIDGE_PORTAL_PARALLEL")) {
+            m_portalParallelInit = (parallel[0] == '1' || parallel[0] == 't' || parallel[0] == 'T'
+                                    || parallel[0] == 'y' || parallel[0] == 'Y');
+        }
+        std::cout << "Portal init mode: "
+                  << (m_portalParallelInit
+                        ? "parallel (RequestClipboard + SelectDevices issued together)"
+                        : "sequential (RequestClipboard then SelectDevices then SelectSources)")
+                  << std::endl;
 
         // Parameters for CreateSession (e.g. token so we know the Request ID)
         GVariantBuilder builder;
