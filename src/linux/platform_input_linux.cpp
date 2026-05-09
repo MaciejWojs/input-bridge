@@ -880,17 +880,14 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     const MonitorInfo& GetCurrentMonitor() const {
-        // Note: m_monitorMutex should be held by caller or this should return a copy
-        if (m_monitors.empty()) {
-            static MonitorInfo fallback = BuildDefaultMonitor();
-            return fallback;
-        }
+        auto it = std::find_if(m_monitors.begin(), m_monitors.end(),
+                               [this](const MonitorInfo& m) { return m.index == m_currentMonitorIndex; });
 
-        if (m_currentMonitorIndex < 0 || static_cast<size_t>(m_currentMonitorIndex) >= m_monitors.size()) {
-            return m_monitors.front();
-        }
+        if (it != m_monitors.end()) return *it;
+        if (!m_monitors.empty())    return m_monitors.front();
 
-        return m_monitors[static_cast<size_t>(m_currentMonitorIndex)];
+        static MonitorInfo fallback = BuildDefaultMonitor();
+        return fallback;
     }
 
     void UpdateVirtualDesktopBounds() {
@@ -1547,27 +1544,35 @@ class PlatformInputLinux : public IPlatformInput {
             monitor = GetCurrentMonitor();
         }
 
-        // Jeśli wymiary są nieznane, nie możemy znormalizować współrzędnych (unikamy Invalid position)
-        if (monitor.width <= 0 || monitor.height <= 0) {
-            return;
+        if (monitor.width <= 0 || monitor.height <= 0) return;
+
+        // Współrzędne x, y są pikselami logicznymi względem wybranego monitora.
+        // Klamrujemy wartości, aby nie wykraczały poza logiczne wymiary monitora.
+        double localX = std::max(0.0, std::min(static_cast<double>(x), static_cast<double>(monitor.width - 1)));
+        double localY = std::max(0.0, std::min(static_cast<double>(y), static_cast<double>(monitor.height - 1)));
+
+        // Zgodnie z informacją użytkownika, faktyczny PipeWire Stream ID znajduje się w monitor.id (string),
+        // a monitor.index jest indeksem z listy. Konwertujemy monitor.id na uint32_t.
+        uint32_t streamIndex = 0;
+        try {
+            streamIndex = std::stoul(monitor.id);
+        } catch (const std::exception& e) {
+            Log("Error parsing PipeWire Stream ID from monitor.id '" + monitor.id + "': " + e.what());
+            return; // Nie można kontynuować bez poprawnego ID strumienia
         }
 
-        // Kontrakt API: x, y są lokalne dla wybranego monitora.
-        // Portal RemoteDesktop oczekuje współrzędnych [0.0, 1.0] relatywnych do strumienia (monitora).
-        double normX = std::clamp(static_cast<double>(x) / static_cast<double>(monitor.width), 0.0, 0.9999);
-        double normY = std::clamp(static_cast<double>(y) / static_cast<double>(monitor.height), 0.0, 0.9999);
-
-        // Używamy monitor.index jako streamIndex. W Twoich logach:
-        // Monitor 0 (id=149) -> streamIndex 0
-        // Monitor 1 (id=206) -> streamIndex 1
-        uint32_t streamIndex = static_cast<uint32_t>(monitor.index);
+        // streamIndex musi odpowiadać ID strumienia z metadanych PipeWire (przechowywane w .index)
+        Log("MoveMouseAbsolute: x=" + std::to_string(localX) + 
+            " y=" + std::to_string(localY) + 
+            " stream=" + std::to_string(streamIndex) + 
+            " (target: " + monitor.id + ")");
 
 #if INPUT_BRIDGE_HAS_LIBEI
         if (eis_connected.load(std::memory_order_relaxed)) {
             EISDispatchPending();
             if (HasEISDevice()) {
-                // EIS zazwyczaj operuje na pikselach lokalnych urządzenia
-                SendEISAbsoluteMotion(static_cast<double>(x), static_cast<double>(y));
+                // EIS preferuje współrzędne lokalne urządzenia (urządzenie jest mapowane na monitor)
+                SendEISAbsoluteMotion(localX, localY);
                 return;
             }
         }
@@ -1583,8 +1588,8 @@ class PlatformInputLinux : public IPlatformInput {
                                             session_handle_str.c_str(), 
                                             g_variant_builder_end(&options_builder), 
                                             streamIndex, 
-                                            normX, 
-                                            normY);
+                                            localX, 
+                                            localY);
 
         if (m_batchMode) {
             GError* error = nullptr;
@@ -1600,7 +1605,7 @@ class PlatformInputLinux : public IPlatformInput {
 
             if (error) {
                 std::cerr << "Failed to send NotifyPointerMotionAbsolute: " << error->message 
-                          << " (pos: " << normX << "," << normY << " stream: " << streamIndex << ")" << std::endl;
+                          << " (pos: " << localX << "," << localY << " stream: " << streamIndex << ")" << std::endl;
                 g_error_free(error);
             }
             if (result) g_variant_unref(result);
@@ -1638,22 +1643,30 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     bool SetCurrentMonitor(int32_t monitorIndex, int32_t width, int32_t height) override {
+        Log("Selecting monitor index " + std::to_string(monitorIndex) + " with requested resolution " + std::to_string(width) + "x" + std::to_string(height));
         std::lock_guard<std::mutex> lock(m_monitorMutex);
-        if (monitorIndex < 0 || static_cast<size_t>(monitorIndex) >= m_monitors.size()) {
+
+        auto it = std::find_if(m_monitors.begin(), m_monitors.end(),
+                               [monitorIndex](const MonitorInfo& m) { return m.id == std::to_string(monitorIndex); });
+
+        if (it == m_monitors.end()) {
+            Log("Failed to select monitor: index=" + std::to_string(monitorIndex) + " not found in monitor list.");
             return false;
         }
 
         m_currentMonitorIndex = monitorIndex;
         if (width > 0 && height > 0) {
-            m_monitors[static_cast<size_t>(monitorIndex)].width = width;
-            m_monitors[static_cast<size_t>(monitorIndex)].height = height;
+            it->width = width;
+            it->height = height;
             UpdateVirtualDesktopBounds();
         }
 
-        // Zresetuj ślad myszy przy zmianie monitora, aby uniknąć skoków
+        // Resetujemy ślad myszy, aby uniknąć gwałtownych ruchów przy zmianie układu współrzędnych
         m_lastX = 0;
         m_lastY = 0;
         
+        Log("Monitor selected: index=" + std::to_string(monitorIndex) + " (PipeWire Stream ID) id=" + it->id + 
+            " res=" + std::to_string(it->width) + "x" + std::to_string(it->height));
 
         return true;
     }
