@@ -1228,9 +1228,10 @@ class PlatformInputLinux : public IPlatformInput {
                                 std::lock_guard<std::mutex> lock(self->session_mutex);
                                 self->session_handle = session_handle_str;
                             }
-                            // On this portal backend RequestClipboard before SelectDevices
-                            // returns "Invalid state", so the default flow starts with
-                            // SelectDevices and requests clipboard right after that.
+                            // On this portal backend RequestClipboard can return
+                            // "Invalid state" until screen sources are selected.
+                            // Default flow: SelectDevices -> SelectSources ->
+                            // RequestClipboard -> Start.
                             if (self->m_portalParallelInit) {
                                 self->m_pendingFirstStageReplies.store(2, std::memory_order_relaxed);
                                 RequestClipboard(self);
@@ -1266,7 +1267,7 @@ class PlatformInputLinux : public IPlatformInput {
                 if (self->m_portalParallelInit) {
                     OnFirstStageReply(self);
                 } else {
-                    RequestClipboard(self);
+                    SelectSources(self);
                 }
             } else {
                 std::cerr << "SelectDevices denied. Response: " << response << std::endl;
@@ -1275,7 +1276,7 @@ class PlatformInputLinux : public IPlatformInput {
         } else if (is_sources_resp) {
             if (response == 0) {
                 std::cout << "ScreenCast.SelectSources completed successfully." << std::endl;
-                StartSession(self);
+                RequestClipboard(self);
             } else {
                 std::cerr << "Screen capture permission denied. Response: " << response << std::endl;
                 self->session_cv.notify_all();
@@ -1510,7 +1511,7 @@ class PlatformInputLinux : public IPlatformInput {
         if (self->m_portalParallelInit) {
             OnFirstStageReply(self);
         } else {
-            SelectSources(self);
+            StartSession(self);
         }
     }
 
@@ -1680,7 +1681,7 @@ class PlatformInputLinux : public IPlatformInput {
         std::cout << "Portal init mode: "
                   << (m_portalParallelInit
                         ? "parallel (RequestClipboard + SelectDevices issued together)"
-                        : "sequential (RequestClipboard then SelectDevices then SelectSources)")
+                        : "sequential (SelectDevices then SelectSources then RequestClipboard)")
                   << std::endl;
 
         // Parameters for CreateSession (e.g. token so we know the Request ID)
