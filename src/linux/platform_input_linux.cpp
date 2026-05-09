@@ -1458,9 +1458,12 @@ class PlatformInputLinux : public IPlatformInput {
         const std::string session_handle = self->GetSessionHandle();
         std::cout << "Calling RequestClipboard on session " << session_handle << "..." << std::endl;
 
+        // RequestClipboard has no OUT handle in the spec; do NOT pass handle_token
+        // in options — backends that try to create a Request on seeing handle_token
+        // will transition the session into an unexpected state and return
+        // "Invalid state" for the RequestClipboard call itself.
         GVariantBuilder builder;
         g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
-        g_variant_builder_add(&builder, "{sv}", "handle_token", g_variant_new_string("clipboardReq"));
 
         GVariant* result = g_dbus_connection_call_sync(
             self->connection,
@@ -1477,7 +1480,9 @@ class PlatformInputLinux : public IPlatformInput {
         );
 
         if (error) {
-            std::cerr << "Failed to RequestClipboard: " << error->message << std::endl;
+            std::cerr << "Failed to RequestClipboard: " << error->message
+                      << " [domain=" << g_quark_to_string(error->domain)
+                      << " code=" << error->code << "]" << std::endl;
             g_error_free(error);
             self->m_clipboardAccessGranted.store(false, std::memory_order_relaxed);
         } else {
