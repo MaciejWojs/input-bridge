@@ -880,8 +880,10 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     const MonitorInfo& GetCurrentMonitor() const {
+        // Szukamy monitora, którego id (jako string) odpowiada zapisanemu m_currentMonitorIndex (PipeWire ID)
+        std::string targetId = std::to_string(m_currentMonitorIndex);
         auto it = std::find_if(m_monitors.begin(), m_monitors.end(),
-                               [this](const MonitorInfo& m) { return m.index == m_currentMonitorIndex; });
+                               [&targetId](const MonitorInfo& m) { return m.id == targetId; });
 
         if (it != m_monitors.end()) return *it;
         if (!m_monitors.empty())    return m_monitors.front();
@@ -1546,13 +1548,12 @@ class PlatformInputLinux : public IPlatformInput {
 
         if (monitor.width <= 0 || monitor.height <= 0) return;
 
-        // Współrzędne x, y są pikselami logicznymi względem wybranego monitora.
-        // Klamrujemy wartości, aby nie wykraczały poza logiczne wymiary monitora.
+        // Przyjmujemy wejściowe x i y jako piksele logiczne [0..width/height]
         double localX = std::max(0.0, std::min(static_cast<double>(x), static_cast<double>(monitor.width - 1)));
         double localY = std::max(0.0, std::min(static_cast<double>(y), static_cast<double>(monitor.height - 1)));
 
-        // Zgodnie z informacją użytkownika, faktyczny PipeWire Stream ID znajduje się w monitor.id (string),
-        // a monitor.index jest indeksem z listy. Konwertujemy monitor.id na uint32_t.
+        // Faktyczny PipeWire Stream ID znajduje się w monitor.id (string). 
+        // monitor.index to tylko pozycja w tablicy.
         uint32_t streamIndex = 0;
         try {
             streamIndex = std::stoul(monitor.id);
@@ -1646,8 +1647,10 @@ class PlatformInputLinux : public IPlatformInput {
         Log("Selecting monitor index " + std::to_string(monitorIndex) + " with requested resolution " + std::to_string(width) + "x" + std::to_string(height));
         std::lock_guard<std::mutex> lock(m_monitorMutex);
 
+        // Szukamy monitora po PipeWire ID (id) a nie po indeksie listy (index)
+        std::string targetId = std::to_string(monitorIndex);
         auto it = std::find_if(m_monitors.begin(), m_monitors.end(),
-                               [monitorIndex](const MonitorInfo& m) { return m.id == std::to_string(monitorIndex); });
+                               [&targetId](const MonitorInfo& m) { return m.id == targetId; });
 
         if (it == m_monitors.end()) {
             Log("Failed to select monitor: index=" + std::to_string(monitorIndex) + " not found in monitor list.");
