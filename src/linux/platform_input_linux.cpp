@@ -1167,11 +1167,15 @@ class PlatformInputLinux : public IPlatformInput {
             } else {
                 std::cerr << "Clipboard access denied. Continuing without clipboard. Response: " << response << std::endl;
             }
-            StartSession(self);
+            SelectSources(self);
         } else if (is_select_resp) {
             if (response == 0) {
                 std::cout << "SelectDevices completed successfully." << std::endl;
-                SelectSources(self);
+                // RequestClipboard before SelectSources so the portal can show clipboard
+                // in the same permission flow as screens (see org.freedesktop.portal.Clipboard:
+                // RequestClipboard must run before the session starts; ordering vs screencast
+                // matters for merged dialogs on GNOME/KDE).
+                RequestClipboard(self);
             } else {
                 std::cerr << "SelectDevices denied. Response: " << response << std::endl;
                 self->session_cv.notify_all();
@@ -1179,7 +1183,7 @@ class PlatformInputLinux : public IPlatformInput {
         } else if (is_sources_resp) {
             if (response == 0) {
                 std::cout << "ScreenCast.SelectSources completed successfully." << std::endl;
-                RequestClipboard(self);
+                StartSession(self);
             } else {
                 std::cerr << "Screen capture permission denied. Response: " << response << std::endl;
                 self->session_cv.notify_all();
@@ -1352,9 +1356,8 @@ class PlatformInputLinux : public IPlatformInput {
         if (error) {
             std::cerr << "Failed to RequestClipboard: " << error->message << std::endl;
             g_error_free(error);
-            // Jeśli żądanie schowka nie powiodło się, kontynuujemy uruchamianie sesji,
-            // aby przynajmniej obsługa myszy i klawiatury działała poprawnie.
-            StartSession(self);
+            // Clipboard portal unavailable; continue with screen selection then Start.
+            SelectSources(self);
         } else {
             if (result && g_variant_is_of_type(result, G_VARIANT_TYPE("(o)")) && g_variant_n_children(result) == 1) {
                 const gchar* request_path = nullptr;
