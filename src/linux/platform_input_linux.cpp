@@ -1285,8 +1285,8 @@ class PlatformInputLinux : public IPlatformInput {
                 if (self->m_portalParallelInit) {
                     OnFirstStageReply(self);
                 } else {
-                    // For sequential mode: after SelectDevices success, request SelectSources
-                    SelectSources(self);
+                    // For sequential mode: after SelectDevices success, request RequestClipboard
+                    RequestClipboard(self);
                 }
             } else {
                 std::cerr << "SelectDevices denied. Response: " << response << std::endl;
@@ -1295,6 +1295,14 @@ class PlatformInputLinux : public IPlatformInput {
         } else if (is_sources_resp) {
             if (response == 0) {
                 std::cout << "ScreenCast.SelectSources completed successfully." << std::endl;
+                     if (results) {
+                    GVariant* token_v = g_variant_lookup_value(results, "restore_token", G_VARIANT_TYPE_STRING);
+                    if (token_v) {
+                        self->m_restoreToken = g_variant_get_string(token_v, nullptr);
+                        std::cout << "Portal Persistent Session restore_token: " << self->m_restoreToken << std::endl;
+                        g_variant_unref(token_v);
+                    }
+                }
                 StartSession(self);
             } else {
                 std::cerr << "Screen capture permission denied. Response: " << response << std::endl;
@@ -1302,6 +1310,14 @@ class PlatformInputLinux : public IPlatformInput {
             }
         } else if (is_start_resp) {
             if (response == 0) {
+                if (results) {
+                    GVariant* token_v = g_variant_lookup_value(results, "restore_token", G_VARIANT_TYPE_STRING);
+                    if (token_v) {
+                        self->m_restoreToken = g_variant_get_string(token_v, nullptr);
+                        std::cout << "Portal Persistent Session restore_token (from Start): " << self->m_restoreToken << std::endl;
+                        g_variant_unref(token_v);
+                    }
+                }
                 std::vector<MonitorInfo> detectedMonitors;
                 if (results) {
                     // RemoteDesktop v2 reports the user's clipboard decision and the
@@ -1488,7 +1504,7 @@ class PlatformInputLinux : public IPlatformInput {
             "org.freedesktop.portal.Clipboard",
             "RequestClipboard",
             g_variant_new("(o@a{sv})", session_handle.c_str(), g_variant_builder_end(&builder)),
-            G_VARIANT_TYPE("(o)"),
+            nullptr, // Some portals return (), some return (o). Let signal handler manage it.
             G_DBUS_CALL_FLAGS_NONE,
             -1,
             nullptr,
@@ -1501,17 +1517,22 @@ class PlatformInputLinux : public IPlatformInput {
                       << " code=" << error->code << "]" << std::endl;
             g_error_free(error);
 
-            // Fallback: jesli portal jest stary i nie wspiera RequestClipboard, kontynuuj do SelectSources
+            // Proceed even if RequestClipboard fails
             if (self->m_portalParallelInit) {
                 OnFirstStageReply(self);
             } else {
-                // SelectSources(self);
-                SelectDevices(self);
+                SelectSources(self);
             }
         } else {
-            const gchar* request_path = nullptr;
-            g_variant_get(result, "(&o)", &request_path);
-            std::cout << "RequestClipboard requested. Request path: " << (request_path ? request_path : "null") << std::endl;
+            bool has_request_handle = false;
+            if (result && g_variant_is_of_type(result, G_VARIANT_TYPE("(o)"))) {
+                const gchar* request_path = nullptr;
+                g_variant_get(result, "(&o)", &request_path);
+                std::cout << "RequestClipboard requested. Request path: " << (request_path ? request_path : "null") << std::endl;
+                has_request_handle = true;
+            } else {
+                std::cout << "RequestClipboard succeeded immediately (no request handle)." << std::endl;
+            }
 
             if (self->clipboard_signal_id == 0) {
                 self->clipboard_signal_id = g_dbus_connection_signal_subscribe(
@@ -1526,6 +1547,17 @@ class PlatformInputLinux : public IPlatformInput {
                     self,
                     nullptr
                 );
+            }
+
+            if (!has_request_handle) {
+                // If no request handle was returned, we won't receive a Response signal.
+                // We treat this as a success and move forward.
+                self->m_clipboardAccessGranted.store(true, std::memory_order_relaxed);
+                if (self->m_portalParallelInit) {
+                    OnFirstStageReply(self);
+                } else {
+                    SelectSources(self);
+                }
             }
         }
 
@@ -1543,7 +1575,7 @@ class PlatformInputLinux : public IPlatformInput {
         g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
         g_variant_builder_add(&builder, "{sv}", "types", g_variant_new_uint32(1)); // 1 = Monitor
         g_variant_builder_add(&builder, "{sv}", "multiple", g_variant_new_boolean(TRUE));
-        g_variant_builder_add(&builder, "{sv}", "cursor_mode", g_variant_new_uint32(1)); // 1 = Hidden (zalecane przy przechwytywaniu ekranu)
+        g_variant_builder_add(&builder, "{sv}", "cursor_mode", g_variant_new_uint32(2)); // 2 = Metadata
         g_variant_builder_add(&builder, "{sv}", "handle_token", g_variant_new_string("sourcesReq"));
 
         GVariant* result = g_dbus_connection_call_sync(
@@ -1567,10 +1599,22 @@ class PlatformInputLinux : public IPlatformInput {
             return;
         }
 
-        if (result) {
+        bool has_request_handle = false;
+        if (result && g_variant_is_of_type(result, G_VARIANT_TYPE("(o)"))) {
             const gchar* request_path = nullptr;
             g_variant_get(result, "(&o)", &request_path);
             std::cout << "SelectSources requested. Request path: " << (request_path ? request_path : "null") << std::endl;
+            has_request_handle = true;
+        } else {
+            std::cout << "SelectSources succeeded immediately (no request handle)." << std::endl;
+        }
+
+        if (!has_request_handle) {
+            // No request handle means no Response signal will come. Start session now.
+            StartSession(self);
+        }
+
+        if (result) {
             g_variant_unref(result);
         }
     }
@@ -1623,13 +1667,25 @@ class PlatformInputLinux : public IPlatformInput {
                 self->session_cv.notify_all();
             }
         } else if (result) {
-            if (g_variant_is_of_type(result, G_VARIANT_TYPE("(o)")) && g_variant_n_children(result) == 1) {
+            bool has_request_handle = false;
+            if (g_variant_is_of_type(result, G_VARIANT_TYPE("(o)"))) {
                 const gchar* request_path = nullptr;
                 g_variant_get(result, "(&o)", &request_path);
                 std::cout << "SelectDevices returned request path: " << (request_path ? request_path : "null") << std::endl;
+                has_request_handle = true;
             } else {
-                std::cout << "SelectDevices returned unexpected result type." << std::endl;
+                std::cout << "SelectDevices succeeded immediately (no request handle)." << std::endl;
             }
+
+            if (!has_request_handle) {
+                // No request handle means no Response signal. Move to next step.
+                if (self->m_portalParallelInit) {
+                    OnFirstStageReply(self);
+                } else {
+                    RequestClipboard(self);
+                }
+            }
+
             g_variant_unref(result);
         }
     }
