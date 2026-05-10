@@ -1323,7 +1323,6 @@ class PlatformInputLinux : public IPlatformInput {
             }
         } else if (is_start_resp) {
             if (response == 0) {
-                self->is_session_started.store(true);
                 if (results) {
                     GVariant* token_v = g_variant_lookup_value(results, "restore_token", G_VARIANT_TYPE_STRING);
                     if (token_v) {
@@ -1439,6 +1438,9 @@ class PlatformInputLinux : public IPlatformInput {
                 }
 
                 std::cout << "RemoteDesktop session successfully STARTed! Ready for input injection." << std::endl;
+                // Mark session as started only after streams/monitors parsing is complete.
+                // This prevents callers waiting on EnsureStarted() from observing stale monitor data.
+                self->is_session_started.store(true);
                 self->is_session_ready.store(true);
                 if (self->input_mode == InputMode::EIS) {
                     std::string eis_error;
