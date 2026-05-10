@@ -274,6 +274,7 @@ class PlatformInputLinux : public IPlatformInput {
     bool m_clipboardEnabledKnown = false;
     unsigned int m_remoteDesktopVersion = 0;
     unsigned int m_clipboardVersion = 0;
+    std::string m_restoreToken;
     // Optional fallback: issue RequestClipboard and SelectDevices in parallel
     // right after CreateSession completes, then run SelectSources only after
     // both responses arrive. Toggled via the INPUT_BRIDGE_PORTAL_PARALLEL env
@@ -1234,10 +1235,10 @@ class PlatformInputLinux : public IPlatformInput {
                             // RequestClipboard -> Start.
                             if (self->m_portalParallelInit) {
                                 self->m_pendingFirstStageReplies.store(2, std::memory_order_relaxed);
-                                RequestClipboard(self);
                                 SelectDevices(self);
-                            } else {
                                 RequestClipboard(self);
+                            } else {
+                                SelectDevices(self);
                             }
                         } else {
                             std::cerr << "Portal response session_handle string was null." << std::endl;
@@ -1254,19 +1255,37 @@ class PlatformInputLinux : public IPlatformInput {
                 self->session_cv.notify_all();
             }
         } else if (is_clipboard_resp) {
-            // The org.freedesktop.portal.Clipboard.RequestClipboard method does
-            // not return a Request handle, so per the spec this Response signal
-            // never fires. We keep this branch only as a defensive log in case a
-            // backend implementation diverges from the spec; advancing the chain
-            // is handled synchronously inside RequestClipboard().
-            std::cout << "Unexpected clipboardReq Response (response=" << response
-                      << "); RequestClipboard normally completes synchronously." << std::endl;
+            if (response == 0) {
+                std::cout << "RequestClipboard completed successfully." << std::endl;
+                self->m_clipboardAccessGranted.store(true, std::memory_order_relaxed);
+            } else {
+                std::cerr << "RequestClipboard denied. Response: " << response << std::endl;
+                self->m_clipboardAccessGranted.store(false, std::memory_order_relaxed);
+            }
+
+            if (self->m_portalParallelInit) {
+                OnFirstStageReply(self);
+            } else {
+                // For sequential mode: after clipboard success, request SelectDevices
+                // If clipboard was denied, we still need to continue the portal flow
+                // but clipboard operations will fail until later enabled
+                SelectDevices(self);
+            }
         } else if (is_select_resp) {
             if (response == 0) {
                 std::cout << "SelectDevices completed successfully." << std::endl;
+                if (results) {
+                    GVariant* token_v = g_variant_lookup_value(results, "restore_token", G_VARIANT_TYPE_STRING);
+                    if (token_v) {
+                        self->m_restoreToken = g_variant_get_string(token_v, nullptr);
+                        std::cout << "Portal Persistent Session restore_token: " << self->m_restoreToken << std::endl;
+                        g_variant_unref(token_v);
+                    }
+                }
                 if (self->m_portalParallelInit) {
                     OnFirstStageReply(self);
                 } else {
+                    // For sequential mode: after SelectDevices success, request SelectSources
                     SelectSources(self);
                 }
             } else {
@@ -1458,12 +1477,9 @@ class PlatformInputLinux : public IPlatformInput {
         const std::string session_handle = self->GetSessionHandle();
         std::cout << "Calling RequestClipboard on session " << session_handle << "..." << std::endl;
 
-        // RequestClipboard has no OUT handle in the spec; do NOT pass handle_token
-        // in options — backends that try to create a Request on seeing handle_token
-        // will transition the session into an unexpected state and return
-        // "Invalid state" for the RequestClipboard call itself.
         GVariantBuilder builder;
         g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
+        g_variant_builder_add(&builder, "{sv}", "handle_token", g_variant_new_string("clipboardReq"));
 
         GVariant* result = g_dbus_connection_call_sync(
             self->connection,
@@ -1472,7 +1488,7 @@ class PlatformInputLinux : public IPlatformInput {
             "org.freedesktop.portal.Clipboard",
             "RequestClipboard",
             g_variant_new("(o@a{sv})", session_handle.c_str(), g_variant_builder_end(&builder)),
-            nullptr,
+            G_VARIANT_TYPE("(o)"),
             G_DBUS_CALL_FLAGS_NONE,
             -1,
             nullptr,
@@ -1484,13 +1500,19 @@ class PlatformInputLinux : public IPlatformInput {
                       << " [domain=" << g_quark_to_string(error->domain)
                       << " code=" << error->code << "]" << std::endl;
             g_error_free(error);
-            self->m_clipboardAccessGranted.store(false, std::memory_order_relaxed);
+
+            // Fallback: jesli portal jest stary i nie wspiera RequestClipboard, kontynuuj do SelectSources
+            if (self->m_portalParallelInit) {
+                OnFirstStageReply(self);
+            } else {
+                // SelectSources(self);
+                SelectDevices(self);
+            }
         } else {
-            // RequestClipboard has no OUT handle in the spec, so we expect an
-            // empty tuple here. Treat completion as the access grant signal and
-            // subscribe to SelectionTransfer before the session starts.
-            self->m_clipboardAccessGranted.store(true, std::memory_order_relaxed);
-            std::cout << "RequestClipboard completed successfully." << std::endl;
+            const gchar* request_path = nullptr;
+            g_variant_get(result, "(&o)", &request_path);
+            std::cout << "RequestClipboard requested. Request path: " << (request_path ? request_path : "null") << std::endl;
+
             if (self->clipboard_signal_id == 0) {
                 self->clipboard_signal_id = g_dbus_connection_signal_subscribe(
                     self->connection,
@@ -1510,14 +1532,6 @@ class PlatformInputLinux : public IPlatformInput {
         if (result) {
             g_variant_unref(result);
         }
-
-        // Advance the chain from the synchronous return: RequestClipboard does
-        // not emit a Response signal, so we cannot wait on OnPortalResponse.
-        if (self->m_portalParallelInit) {
-            OnFirstStageReply(self);
-        } else {
-            SelectDevices(self);
-        }
     }
 
     static void SelectSources(PlatformInputLinux* self) {
@@ -1527,9 +1541,9 @@ class PlatformInputLinux : public IPlatformInput {
 
         GVariantBuilder builder;
         g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
-        g_variant_builder_add(&builder, "{sv}", "types", g_variant_new_uint32(1));
+        g_variant_builder_add(&builder, "{sv}", "types", g_variant_new_uint32(1)); // 1 = Monitor
         g_variant_builder_add(&builder, "{sv}", "multiple", g_variant_new_boolean(TRUE));
-        g_variant_builder_add(&builder, "{sv}", "cursor_mode", g_variant_new_uint32(2));
+        g_variant_builder_add(&builder, "{sv}", "cursor_mode", g_variant_new_uint32(1)); // 1 = Hidden (zalecane przy przechwytywaniu ekranu)
         g_variant_builder_add(&builder, "{sv}", "handle_token", g_variant_new_string("sourcesReq"));
 
         GVariant* result = g_dbus_connection_call_sync(
@@ -1575,10 +1589,16 @@ class PlatformInputLinux : public IPlatformInput {
         GVariantBuilder builder;
         g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
 
-        uint32_t types = 3;
+        uint32_t types = 7; // Klawiatura (1) | Wskaźnik (2) | Dotyk (4)
 
         g_variant_builder_add(&builder, "{sv}", "types", g_variant_new_uint32(types));
         g_variant_builder_add(&builder, "{sv}", "handle_token", g_variant_new_string("selectReq"));
+
+        // Obsługa sesji permanentnej
+        g_variant_builder_add(&builder, "{sv}", "persist_mode", g_variant_new_uint32(2)); // 2 = Permanentnie
+        if (!self->m_restoreToken.empty()) {
+            g_variant_builder_add(&builder, "{sv}", "restore_token", g_variant_new_string(self->m_restoreToken.c_str()));
+        }
 
         GVariant* result = g_dbus_connection_call_sync(
             self->connection,
@@ -1679,6 +1699,12 @@ class PlatformInputLinux : public IPlatformInput {
 
         is_running = true;
 
+        // Próba odczytania tokenu przywracania z env dla ułatwienia testów/wdrożenia
+        if (const char* env_token = std::getenv("INPUT_BRIDGE_RESTORE_TOKEN")) {
+            m_restoreToken = env_token;
+            std::cout << "Using restore_token from environment: " << m_restoreToken << std::endl;
+        }
+
         if (const char* parallel = std::getenv("INPUT_BRIDGE_PORTAL_PARALLEL")) {
             m_portalParallelInit = (parallel[0] == '1' || parallel[0] == 't' || parallel[0] == 'T'
                                     || parallel[0] == 'y' || parallel[0] == 'Y');
@@ -1686,7 +1712,7 @@ class PlatformInputLinux : public IPlatformInput {
         std::cout << "Portal init mode: "
                   << (m_portalParallelInit
                         ? "parallel (RequestClipboard + SelectDevices issued together)"
-                        : "sequential (RequestClipboard then SelectDevices then SelectSources)")
+                        : "sequential (SelectDevices then RequestClipboard then SelectSources)")
                   << std::endl;
 
         // Parameters for CreateSession (e.g. token so we know the Request ID)
