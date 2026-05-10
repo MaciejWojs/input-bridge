@@ -112,6 +112,8 @@ For single portal permission flow across addons:
 ```ts
 await inputBridge.init();
 
+// IMPORTANT: Call openPipeWireRemoteFd() before getMonitors() so Start has run and
+// stream IDs in getMonitors() match the portal PipeWire nodes.
 const portalSessionHandle = inputBridge.getPortalSessionHandle();
 const pipewireRemoteFd = inputBridge.openPipeWireRemoteFd();
 const portalMonitors = inputBridge.getMonitors().map((m) => ({
