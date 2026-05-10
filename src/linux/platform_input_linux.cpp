@@ -911,6 +911,7 @@ class PlatformInputLinux : public IPlatformInput {
 
     std::mutex session_mutex;
     std::condition_variable session_cv;
+    std::atomic<bool> is_session_started = false;
 
     std::string GetSessionHandle() {
         std::lock_guard<std::mutex> lock(session_mutex);
@@ -949,6 +950,15 @@ class PlatformInputLinux : public IPlatformInput {
 
         static MonitorInfo fallback = BuildDefaultMonitor();
         return fallback;
+    }
+
+    bool EnsureStarted() {
+        if (is_session_started.load(std::memory_order_relaxed)) return true;
+        if (!is_session_ready.load(std::memory_order_relaxed)) return false;
+
+        StartSession(this);
+        std::unique_lock<std::mutex> lock(session_mutex);
+        return session_cv.wait_for(lock, std::chrono::seconds(5), [this] { return this->is_session_started.load(std::memory_order_relaxed); });
     }
 
     void UpdateVirtualDesktopBounds() {
@@ -1188,11 +1198,11 @@ class PlatformInputLinux : public IPlatformInput {
 
         g_variant_get(parameters, "(u@a{sv})", &response, &results);
 
-        const bool is_create_resp = g_str_has_suffix(object_path, "createReq");
-        const bool is_clipboard_resp = g_str_has_suffix(object_path, "clipboardReq");
-        const bool is_select_resp = g_str_has_suffix(object_path, "selectReq");
-        const bool is_sources_resp = g_str_has_suffix(object_path, "sourcesReq");
-        const bool is_start_resp = g_str_has_suffix(object_path, "startReq");
+        const bool is_create_resp = g_str_has_suffix(object_path, "ib_create");
+        const bool is_clipboard_resp = g_str_has_suffix(object_path, "ib_clipboard");
+        const bool is_select_resp = g_str_has_suffix(object_path, "ib_select");
+        const bool is_sources_resp = g_str_has_suffix(object_path, "ib_sources") || g_str_has_suffix(object_path, "sc_sources");
+        const bool is_start_resp = g_str_has_suffix(object_path, "ib_start") || g_str_has_suffix(object_path, "sc_start");
 
         std::cout << "Portal Response signal from: " << object_path
             << " response=" << response << std::endl;
@@ -1303,13 +1313,17 @@ class PlatformInputLinux : public IPlatformInput {
                         g_variant_unref(token_v);
                     }
                 }
-                StartSession(self);
+                // We stop here and let the capture addon trigger 'Start' so it can receive 
+                // the monitor stream info. We mark session as ready so init() resolves.
+                self->is_session_ready.store(true);
+                self->session_cv.notify_all();
             } else {
                 std::cerr << "Screen capture permission denied. Response: " << response << std::endl;
                 self->session_cv.notify_all();
             }
         } else if (is_start_resp) {
             if (response == 0) {
+                self->is_session_started.store(true);
                 if (results) {
                     GVariant* token_v = g_variant_lookup_value(results, "restore_token", G_VARIANT_TYPE_STRING);
                     if (token_v) {
@@ -1318,7 +1332,6 @@ class PlatformInputLinux : public IPlatformInput {
                         g_variant_unref(token_v);
                     }
                 }
-                std::vector<MonitorInfo> detectedMonitors;
                 if (results) {
                     // RemoteDesktop v2 reports the user's clipboard decision and the
                     // negotiated device bitmask in the Start response. Parsing both
@@ -1350,6 +1363,7 @@ class PlatformInputLinux : public IPlatformInput {
                         std::cout << "Start: devices key missing in response." << std::endl;
                     }
 
+                    std::vector<MonitorInfo> detectedMonitors;
                     GVariant* streams_v = g_variant_lookup_value(results, "streams", G_VARIANT_TYPE("a(ua{sv})"));
                     if (streams_v) {
                         GVariantIter stream_iter;
@@ -1415,13 +1429,13 @@ class PlatformInputLinux : public IPlatformInput {
                         }
                         g_variant_unref(streams_v);
                     }
-                }
 
-                if (!detectedMonitors.empty()) {
-                    std::lock_guard<std::mutex> lock(self->m_monitorMutex);
-                    self->m_monitors = std::move(detectedMonitors);
-                    self->m_currentMonitorIndex = std::stoi(self->m_monitors.front().id);
-                    self->UpdateVirtualDesktopBounds();
+                    if (!detectedMonitors.empty()) {
+                        std::lock_guard<std::mutex> lock(self->m_monitorMutex);
+                        self->m_monitors = std::move(detectedMonitors);
+                        self->m_currentMonitorIndex = std::stoi(self->m_monitors.front().id);
+                        self->UpdateVirtualDesktopBounds();
+                    }
                 }
 
                 std::cout << "RemoteDesktop session successfully STARTed! Ready for input injection." << std::endl;
@@ -1456,7 +1470,7 @@ class PlatformInputLinux : public IPlatformInput {
 
         GVariantBuilder options_builder;
         g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
-        g_variant_builder_add(&options_builder, "{sv}", "handle_token", g_variant_new_string("startReq"));
+        g_variant_builder_add(&options_builder, "{sv}", "handle_token", g_variant_new_string("ib_start"));
 
         GVariant* start_result = g_dbus_connection_call_sync(
             self->connection,
@@ -1495,7 +1509,7 @@ class PlatformInputLinux : public IPlatformInput {
 
         GVariantBuilder builder;
         g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
-        g_variant_builder_add(&builder, "{sv}", "handle_token", g_variant_new_string("clipboardReq"));
+        g_variant_builder_add(&builder, "{sv}", "handle_token", g_variant_new_string("ib_clipboard"));
 
         GVariant* result = g_dbus_connection_call_sync(
             self->connection,
@@ -1576,7 +1590,7 @@ class PlatformInputLinux : public IPlatformInput {
         g_variant_builder_add(&builder, "{sv}", "types", g_variant_new_uint32(1)); // 1 = Monitor
         g_variant_builder_add(&builder, "{sv}", "multiple", g_variant_new_boolean(TRUE));
         g_variant_builder_add(&builder, "{sv}", "cursor_mode", g_variant_new_uint32(2)); // 2 = Metadata
-        g_variant_builder_add(&builder, "{sv}", "handle_token", g_variant_new_string("sourcesReq"));
+        g_variant_builder_add(&builder, "{sv}", "handle_token", g_variant_new_string("ib_sources"));
 
         GVariant* result = g_dbus_connection_call_sync(
             self->connection,
@@ -1636,7 +1650,7 @@ class PlatformInputLinux : public IPlatformInput {
         uint32_t types = 7; // Klawiatura (1) | Wskaźnik (2) | Dotyk (4)
 
         g_variant_builder_add(&builder, "{sv}", "types", g_variant_new_uint32(types));
-        g_variant_builder_add(&builder, "{sv}", "handle_token", g_variant_new_string("selectReq"));
+        g_variant_builder_add(&builder, "{sv}", "handle_token", g_variant_new_string("ib_select"));
 
         // Obsługa sesji permanentnej
         g_variant_builder_add(&builder, "{sv}", "persist_mode", g_variant_new_uint32(2)); // 2 = Permanentnie
@@ -1774,8 +1788,8 @@ class PlatformInputLinux : public IPlatformInput {
         // Parameters for CreateSession (e.g. token so we know the Request ID)
         GVariantBuilder builder;
         g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
-        g_variant_builder_add(&builder, "{sv}", "session_handle_token", g_variant_new_string("inputbridgesession"));
-        g_variant_builder_add(&builder, "{sv}", "handle_token", g_variant_new_string("createReq"));
+        g_variant_builder_add(&builder, "{sv}", "session_handle_token", g_variant_new_string("ib_session"));
+        g_variant_builder_add(&builder, "{sv}", "handle_token", g_variant_new_string("ib_create"));
 
 
         // Call CreateSession
@@ -1855,6 +1869,11 @@ class PlatformInputLinux : public IPlatformInput {
             return std::nullopt;
         }
 
+        if (!EnsureStarted()) {
+            error_msg = "Failed to start session before opening PipeWire remote.";
+            return std::nullopt;
+        }
+
         const std::string current_session = GetSessionHandle();
         if (current_session.empty()) {
             error_msg = "RemoteDesktop session handle is empty.";
@@ -1906,7 +1925,7 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     void MoveMouseRelative(int32_t x, int32_t y) override {
-        if (!is_session_ready) return;
+        if (!EnsureStarted()) return;
 #if INPUT_BRIDGE_HAS_LIBEI
         if (eis_connected.load(std::memory_order_relaxed)) {
             EISDispatchPending();
@@ -1974,7 +1993,7 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     void MoveMouseAbsolute(int32_t x, int32_t y) override {
-        if (!is_session_ready) return;
+        if (!EnsureStarted()) return;
 
         MonitorInfo monitor;
         {
@@ -2118,7 +2137,7 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     void MouseClick(int32_t button, bool down) override {
-        if (!is_session_ready) return;
+        if (!EnsureStarted()) return;
 #if INPUT_BRIDGE_HAS_LIBEI
         if (eis_connected.load(std::memory_order_relaxed)) {
             EISDispatchPending();
@@ -2185,7 +2204,7 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     void KeyPress(int32_t keyCode, bool down) override {
-        if (!is_session_ready) return;
+        if (!EnsureStarted()) return;
 #if INPUT_BRIDGE_HAS_LIBEI
         if (keyboard_routing == KeyboardRouting::EIS && eis_connected.load(std::memory_order_relaxed)) {
             EISDispatchPending();
@@ -2292,7 +2311,7 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     void ScrollMouse(int32_t delta) {
-        if (!is_session_ready) return;
+        if (!EnsureStarted()) return;
 #if INPUT_BRIDGE_HAS_LIBEI
         if (eis_connected.load(std::memory_order_relaxed)) {
             EISDispatchPending();
@@ -2360,7 +2379,7 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     void TypeCharacter(uint32_t charCode) override {
-        if (!is_session_ready) return;
+        if (!EnsureStarted()) return;
 #if INPUT_BRIDGE_HAS_LIBEI
         if (keyboard_routing == KeyboardRouting::EIS && eis_connected.load(std::memory_order_relaxed)) {
             EISDispatchPending();

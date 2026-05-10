@@ -104,3 +104,32 @@ Built artifacts are placed in `prebuilds/` and loaded automatically by `lib/inde
 ## Notes
 
 The repository is designed to keep the public JS API stable while allowing per-platform native backend extensions. The `InputBridge` wrapper always exposes the same methods regardless of the active backend.
+
+## Wayland addon sharing with screen-capture
+
+For single portal permission flow across addons:
+
+```ts
+await inputBridge.init();
+
+const portalSessionHandle = inputBridge.getPortalSessionHandle();
+const pipewireRemoteFd = inputBridge.openPipeWireRemoteFd();
+const portalMonitors = inputBridge.getMonitors().map((m) => ({
+  id: m.id,
+  name: m.name,
+  index: m.index,
+  x: m.x,
+  y: m.y,
+  width: m.width,
+  height: m.height,
+  pipewireStream: Number(m.id),
+}));
+
+const capture = new ScreenCapture({
+  portalSessionHandle: portalSessionHandle ?? undefined,
+  pipewireRemoteFd: pipewireRemoteFd ?? undefined,
+  portalMonitors,
+});
+```
+
+Expected order: one shared session, one `RemoteDesktop.Start`, then `ScreenCast.OpenPipeWireRemote`.
