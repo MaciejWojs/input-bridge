@@ -38,7 +38,7 @@ bridge.flush();
 
 ## API overview
 
-- `init()` - initializes the native bridge and requests permissions on Linux
+- `init()` - initializes the native bridge; on Wayland runs the full portal flow through `RemoteDesktop.Start` so monitor list is ready for screen-capture pairing
 - `moveMouseRelative(x, y)` - queue a relative mouse movement
 - `moveMouseAbsolute(x, y)` - queue an absolute mouse movement
 - `mouseClick(button, down)` - queue a mouse button press/release
@@ -55,6 +55,29 @@ bridge.flush();
 - `toggleOptimization()` - enable/disable internal mouse move optimization
 - `flush()` - execute all queued input events
 - `setLogger(callback)` - receive native backend log messages
+
+In addition to the `InputBridge` class, the package exports a standalone
+`getCursorType()` function that returns the current system pointer cursor as
+a CSS-compatible name.
+
+```ts
+import { getCursorType } from '@maciejwojs/input-bridge';
+
+console.log(getCursorType()); // "default", "pointer", "text", ...
+```
+
+Behavior per platform:
+
+- Windows uses `GetCursorInfo` and maps the standard system cursors to CSS
+  values such as `default`, `pointer`, `text`, `crosshair`, `move`, `wait`,
+  `progress`, `help`, `not-allowed`, and the `*-resize` family.
+- Linux X11 (built with `use_x11_backend=1`) reads the active cursor name via
+  the Xfixes extension and maps known X cursor themes to CSS.
+- Linux Wayland and the default portal-only build return `default`. Wayland
+  intentionally hides the global pointer cursor from background processes, so
+  inspecting the cursor of another surface is not possible without integrating
+  with a PipeWire screencast metadata stream.
+- Application-defined or unknown cursors fall back to `default`.
 
 ## Build and development
 
@@ -99,8 +122,40 @@ Built artifacts are placed in `prebuilds/` and loaded automatically by `lib/inde
 - `src/linux/platform_input_linux.cpp` - Linux backend
 - `src/platform_input_stub.cpp` - fallback implementation
 - `src/platform_input.hpp` - shared backend interface and event queue
+- `src/cursor/` - standalone module exposing `getCursorType()` (Win32 / X11 + Xfixes / Wayland stub)
 - `binding.gyp` - native addon build configuration
 
 ## Notes
 
 The repository is designed to keep the public JS API stable while allowing per-platform native backend extensions. The `InputBridge` wrapper always exposes the same methods regardless of the active backend.
+
+## Wayland addon sharing with screen-capture
+
+For single portal permission flow across addons:
+
+```ts
+await inputBridge.init();
+
+// IMPORTANT: Call openPipeWireRemoteFd() before getMonitors() so Start has run and
+// stream IDs in getMonitors() match the portal PipeWire nodes.
+const portalSessionHandle = inputBridge.getPortalSessionHandle();
+const pipewireRemoteFd = inputBridge.openPipeWireRemoteFd();
+const portalMonitors = inputBridge.getMonitors().map((m) => ({
+  id: m.id,
+  name: m.name,
+  index: m.index,
+  x: m.x,
+  y: m.y,
+  width: m.width,
+  height: m.height,
+  pipewireStream: Number(m.id),
+}));
+
+const capture = new ScreenCapture({
+  portalSessionHandle: portalSessionHandle ?? undefined,
+  pipewireRemoteFd: pipewireRemoteFd ?? undefined,
+  portalMonitors,
+});
+```
+
+Expected order: one shared session, one `RemoteDesktop.Start`, then `ScreenCast.OpenPipeWireRemote`.

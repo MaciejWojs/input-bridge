@@ -6,6 +6,7 @@
 #include <shlobj.h>
 #include <objidl.h>
 #include <ole2.h>
+#include <algorithm>
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -107,6 +108,34 @@ static bool ReadFileToBytes(const std::wstring& filePath, std::vector<uint8_t>& 
     }
     CloseHandle(file);
     return ok;
+}
+
+namespace {
+
+    BOOL CALLBACK EnumWindowsMonitorProc(HMONITOR hMonitor, HDC, LPRECT, LPARAM data) {
+        auto* monitors = reinterpret_cast<std::vector<MonitorInfo>*>(data);
+        if (!monitors) return FALSE;
+
+        MONITORINFOEXW monitorInfo = {};
+        monitorInfo.cbSize = sizeof(monitorInfo);
+        if (!GetMonitorInfoW(hMonitor, &monitorInfo)) {
+            return TRUE;
+        }
+
+        MonitorInfo monitor;
+        monitor.index = static_cast<int32_t>(monitors->size());
+        monitor.id = WideToUtf8(monitorInfo.szDevice);
+        monitor.name = monitor.id;
+        monitor.x = monitorInfo.rcMonitor.left;
+        monitor.y = monitorInfo.rcMonitor.top;
+        monitor.width = monitorInfo.rcMonitor.right - monitorInfo.rcMonitor.left;
+        monitor.height = monitorInfo.rcMonitor.bottom - monitorInfo.rcMonitor.top;
+        monitor.primary = (monitorInfo.dwFlags & MONITORINFOF_PRIMARY) != 0;
+
+        monitors->push_back(std::move(monitor));
+        return TRUE;
+    }
+
 }
 
 class RemoteFileDataObject : public IDataObject {
@@ -311,12 +340,139 @@ class RemoteFileDataObject : public IDataObject {
 class PlatformInputWin : public IPlatformInput {
     private:
     std::vector<INPUT> m_winInputs;
+    std::vector<MonitorInfo> m_monitors;
+    int32_t m_currentMonitorIndex = 0;
     ClipboardChangeCallback m_clipboardCallback;
     std::thread m_clipboardThread;
     std::atomic<bool> m_clipboardThreadRunning{ false };
     std::mutex m_clipboardMutex;
     std::condition_variable m_clipboardReady;
     HWND m_clipboardWindow = nullptr;
+
+    InputEventCallback m_inputCallback;
+    std::jthread m_inputDetectionThread;
+    std::atomic<bool> m_inputDetectionRunning{ false };
+    std::mutex m_inputDetectionMutex;
+    std::condition_variable m_inputDetectionReady;
+    DWORD m_inputDetectionThreadId = 0;
+    HHOOK m_kbHook = nullptr;
+    HHOOK m_msHook = nullptr;
+
+    std::atomic<int> m_detectionDistanceThreshold{ 0 };
+    std::atomic<int> m_lastDetectedMouseX{ -1 };
+    std::atomic<int> m_lastDetectedMouseY{ -1 };
+
+    static PlatformInputWin* s_instance;
+
+    static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
+        if (nCode == HC_ACTION && s_instance && s_instance->m_inputCallback) {
+            KBDLLHOOKSTRUCT* pkbhs = reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
+            ::KeyPress kp;
+            kp.keyCode = static_cast<int32_t>(pkbhs->vkCode);
+            kp.down = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
+
+            char name[256];
+            LONG scancode = pkbhs->scanCode << 16;
+            if (pkbhs->flags & LLKHF_EXTENDED) {
+                scancode |= 0x01000000;
+            }
+            if (GetKeyNameTextA(scancode, name, 256) > 0) {
+                kp.domCode = std::string(name);
+            }
+
+            InputEvent ev = kp;
+            s_instance->m_inputCallback(ev);
+        }
+        return CallNextHookEx(nullptr, nCode, wParam, lParam);
+    }
+
+    static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
+        if (nCode == HC_ACTION && s_instance && s_instance->m_inputCallback) {
+            MSLLHOOKSTRUCT* pmshs = reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
+            if (wParam == WM_MOUSEMOVE) {
+                int x = static_cast<int32_t>(pmshs->pt.x);
+                int y = static_cast<int32_t>(pmshs->pt.y);
+                int threshold = s_instance->m_detectionDistanceThreshold.load(std::memory_order_relaxed);
+                int lastX = s_instance->m_lastDetectedMouseX.load(std::memory_order_relaxed);
+                int lastY = s_instance->m_lastDetectedMouseY.load(std::memory_order_relaxed);
+
+                if (threshold > 0 && lastX != -1) {
+                    long long dx = static_cast<long long>(x) - lastX;
+                    long long dy = static_cast<long long>(y) - lastY;
+                    if ((dx * dx + dy * dy) < static_cast<long long>(threshold * threshold)) {
+                        return CallNextHookEx(nullptr, nCode, wParam, lParam);
+                    }
+                }
+
+                s_instance->m_lastDetectedMouseX.store(x, std::memory_order_relaxed);
+                s_instance->m_lastDetectedMouseY.store(y, std::memory_order_relaxed);
+
+                ::MouseMoveAbsolute mm;
+                mm.x = x;
+                mm.y = y;
+                InputEvent ev = mm;
+                s_instance->m_inputCallback(ev);
+            } else if (wParam == WM_LBUTTONDOWN || wParam == WM_LBUTTONUP) {
+                ::MouseClick mc;
+                mc.button = 0;
+                mc.down = (wParam == WM_LBUTTONDOWN);
+                InputEvent ev = mc;
+                s_instance->m_inputCallback(ev);
+            } else if (wParam == WM_RBUTTONDOWN || wParam == WM_RBUTTONUP) {
+                ::MouseClick mc;
+                mc.button = 1;
+                mc.down = (wParam == WM_RBUTTONDOWN);
+                InputEvent ev = mc;
+                s_instance->m_inputCallback(ev);
+            } else if (wParam == WM_MBUTTONDOWN || wParam == WM_MBUTTONUP) {
+                ::MouseClick mc;
+                mc.button = 2;
+                mc.down = (wParam == WM_MBUTTONDOWN);
+                InputEvent ev = mc;
+                s_instance->m_inputCallback(ev);
+            } else if (wParam == WM_MOUSEWHEEL) {
+                ::MouseScroll ms;
+                ms.delta = static_cast<int32_t>(static_cast<short>(HIWORD(pmshs->mouseData)));
+                InputEvent ev = ms;
+                s_instance->m_inputCallback(ev);
+            }
+        }
+        return CallNextHookEx(nullptr, nCode, wParam, lParam);
+    }
+
+    void RunInputDetectionLoop() {
+        {
+            std::lock_guard<std::mutex> lock(m_inputDetectionMutex);
+            m_inputDetectionThreadId = GetCurrentThreadId();
+
+            s_instance = this;
+            m_kbHook = SetWindowsHookEx(WH_KEYBOARD_LL, LowLevelKeyboardProc, GetModuleHandle(nullptr), 0);
+            m_msHook = SetWindowsHookEx(WH_MOUSE_LL, LowLevelMouseProc, GetModuleHandle(nullptr), 0);
+
+            m_inputDetectionReady.notify_all();
+        }
+
+        MSG msg;
+        while (GetMessage(&msg, nullptr, 0, 0)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(m_inputDetectionMutex);
+            if (m_kbHook) {
+                UnhookWindowsHookEx(m_kbHook);
+                m_kbHook = nullptr;
+            }
+            if (m_msHook) {
+                UnhookWindowsHookEx(m_msHook);
+                m_msHook = nullptr;
+            }
+            s_instance = nullptr;
+            m_inputDetectionThreadId = 0;
+            m_inputDetectionRunning = false;
+        }
+    }
 
     static LRESULT CALLBACK ClipboardWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
         if (message == WM_CREATE) {
@@ -472,6 +628,29 @@ class PlatformInputWin : public IPlatformInput {
     PlatformInputWin() {
         // Reserve memory up front to prevent frequent allocations on every flush
         m_winInputs.reserve(1024);
+        RefreshMonitors();
+    }
+
+    std::vector<MonitorInfo> GetMonitors() override {
+        return m_monitors;
+    }
+
+    void SetMonitors(const std::vector<MonitorInfo>& monitors) override {
+        // No-op for Windows as requested.
+    }
+
+    bool SetCurrentMonitor(int32_t monitorIndex, int32_t width, int32_t height) override {
+        if (monitorIndex < 0 || static_cast<size_t>(monitorIndex) >= m_monitors.size()) {
+            return false;
+        }
+
+        m_currentMonitorIndex = monitorIndex;
+        if (width > 0 && height > 0) {
+            m_monitors[static_cast<size_t>(monitorIndex)].width = width;
+            m_monitors[static_cast<size_t>(monitorIndex)].height = height;
+        }
+
+        return true;
     }
 
     bool Initialize(std::string& error_msg) override {
@@ -504,14 +683,88 @@ class PlatformInputWin : public IPlatformInput {
         SendInput(1, &input, sizeof(INPUT));
     }
 
-    void MoveMouseAbsolute(int32_t x, int32_t y) override {
-        Log("PlatformInputWin: MoveMouseAbsolute x=" + std::to_string(x) + " y=" + std::to_string(y));
+    const MonitorInfo& GetCurrentMonitor() const {
+        if (m_monitors.empty()) {
+            static MonitorInfo fallbackMonitor{ 0, "default", "default", 0, 0, 1, 1, true };
+            return fallbackMonitor;
+        }
+
+        if (m_currentMonitorIndex < 0 || static_cast<size_t>(m_currentMonitorIndex) >= m_monitors.size()) {
+            return m_monitors.front();
+        }
+
+        return m_monitors[static_cast<size_t>(m_currentMonitorIndex)];
+    }
+
+    void RefreshMonitors() {
+        m_monitors.clear();
+        EnumDisplayMonitors(nullptr, nullptr, EnumWindowsMonitorProc, reinterpret_cast<LPARAM>(&m_monitors));
+
+        if (m_monitors.empty()) {
+            MonitorInfo fallback;
+            fallback.index = 0;
+            fallback.id = "default";
+            fallback.name = "default";
+            fallback.x = 0;
+            fallback.y = 0;
+            fallback.width = GetSystemMetrics(SM_CXSCREEN);
+            fallback.height = GetSystemMetrics(SM_CYSCREEN);
+            fallback.primary = true;
+            if (fallback.width <= 0) fallback.width = 1;
+            if (fallback.height <= 0) fallback.height = 1;
+            m_monitors.push_back(std::move(fallback));
+        }
+
+        for (size_t i = 0; i < m_monitors.size(); ++i) {
+            m_monitors[i].index = static_cast<int32_t>(i);
+        }
+
+        for (size_t i = 0; i < m_monitors.size(); ++i) {
+            if (m_monitors[i].primary) {
+                m_currentMonitorIndex = static_cast<int32_t>(i);
+                return;
+            }
+        }
+
+        m_currentMonitorIndex = 0;
+    }
+
+    INPUT BuildAbsoluteMouseInput(int32_t x, int32_t y) const {
+        const MonitorInfo& monitor = GetCurrentMonitor();
+
+        int32_t localX = x;
+        int32_t localY = y;
+        if (monitor.width > 0) {
+            localX = std::max(0, std::min(localX, monitor.width - 1));
+        }
+        if (monitor.height > 0) {
+            localY = std::max(0, std::min(localY, monitor.height - 1));
+        }
+
+        const int globalX = monitor.x + localX;
+        const int globalY = monitor.y + localY;
+
+        int virtLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        int virtTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        int virtScreenWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        int virtScreenHeight = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+        if (virtScreenWidth <= 0) virtScreenWidth = GetSystemMetrics(SM_CXSCREEN);
+        if (virtScreenHeight <= 0) virtScreenHeight = GetSystemMetrics(SM_CYSCREEN);
+        if (virtScreenWidth <= 1) virtScreenWidth = 2;
+        if (virtScreenHeight <= 1) virtScreenHeight = 2;
 
         INPUT input = { 0 };
         input.type = INPUT_MOUSE;
-        input.mi.dx = (x * 65535) / (GetSystemMetrics(SM_CXSCREEN) - 1);
-        input.mi.dy = (y * 65535) / (GetSystemMetrics(SM_CYSCREEN) - 1);
-        input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+        input.mi.dx = ((globalX - virtLeft) * 65535) / (virtScreenWidth - 1);
+        input.mi.dy = ((globalY - virtTop) * 65535) / (virtScreenHeight - 1);
+        input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+        return input;
+    }
+
+    void MoveMouseAbsolute(int32_t x, int32_t y) override {
+        Log("PlatformInputWin: MoveMouseAbsolute x=" + std::to_string(x) + " y=" + std::to_string(y));
+        INPUT input = BuildAbsoluteMouseInput(x, y);
         SendInput(1, &input, sizeof(INPUT));
     }
 
@@ -616,12 +869,7 @@ class PlatformInputWin : public IPlatformInput {
                     input.mi.dwFlags = MOUSEEVENTF_MOVE;
                     eventInputs.push_back(input);
                 } else if constexpr (std::is_same_v<T, struct MouseMoveAbsolute>) {
-                    INPUT input = { 0 };
-                    input.type = INPUT_MOUSE;
-                    input.mi.dx = (e.x * 65535) / (GetSystemMetrics(SM_CXSCREEN) - 1);
-                    input.mi.dy = (e.y * 65535) / (GetSystemMetrics(SM_CYSCREEN) - 1);
-                    input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
-                    eventInputs.push_back(input);
+                    eventInputs.push_back(BuildAbsoluteMouseInput(e.x, e.y));
                 } else if constexpr (std::is_same_v<T, struct MouseClick>) {
                     INPUT input = { 0 };
                     input.type = INPUT_MOUSE;
@@ -808,4 +1056,54 @@ class PlatformInputWin : public IPlatformInput {
         CloseClipboard();
         return files;
     }
+
+    bool StartInputDetection() override {
+        bool expected = false;
+        if (!m_inputDetectionRunning.compare_exchange_strong(expected, true)) {
+            return true; // Already running
+        }
+
+        // Reset positions to ensure the first movement is always captured
+        m_lastDetectedMouseX.store(-1, std::memory_order_relaxed);
+        m_lastDetectedMouseY.store(-1, std::memory_order_relaxed);
+
+        m_inputDetectionThread = std::jthread([this]() {
+            RunInputDetectionLoop();
+            });
+
+        std::unique_lock<std::mutex> lock(m_inputDetectionMutex);
+        m_inputDetectionReady.wait(lock, [this]() {
+            return (m_kbHook != nullptr && m_msHook != nullptr) || !m_inputDetectionRunning.load();
+            });
+
+        return m_kbHook != nullptr && m_msHook != nullptr;
+    }
+
+    void StopInputDetection() override {
+        bool expected = true;
+        if (m_inputDetectionRunning.compare_exchange_strong(expected, false)) {
+            DWORD threadId = 0;
+            {
+                std::lock_guard<std::mutex> lock(m_inputDetectionMutex);
+                threadId = m_inputDetectionThreadId;
+            }
+            if (threadId != 0) {
+                PostThreadMessage(threadId, WM_QUIT, 0, 0);
+            }
+
+            if (m_inputDetectionThread.joinable()) {
+                m_inputDetectionThread.join();
+            }
+        }
+    }
+
+    void SetInputEventCallback(InputEventCallback cb) override {
+        m_inputCallback = cb;
+    }
+
+    void SetDetectionOptimizationThreshold(int distanceThreshold) override {
+        m_detectionDistanceThreshold.store(distanceThreshold, std::memory_order_relaxed);
+    }
 };
+
+PlatformInputWin* PlatformInputWin::s_instance = nullptr;

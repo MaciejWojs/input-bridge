@@ -4,6 +4,7 @@
 #include <X11/Xlib.h>
 #include <X11/keysym.h>
 #include <X11/extensions/XTest.h>
+#include <X11/extensions/Xrandr.h>
 
 // Fix for X11 macro pollution
 #undef KeyPress
@@ -20,6 +21,8 @@
 #include <string>
 #include <vector>
 #include <map>
+
+#include <algorithm>
 
 using xkb_utf32_to_keysym_t = uint32_t(*)(uint32_t);
 static void* xkb_handle = nullptr;
@@ -152,10 +155,92 @@ namespace {
 
 } // namespace
 
+namespace {
+
+    bool LoadX11Monitors(Display* display, std::vector<MonitorInfo>& monitors) {
+        monitors.clear();
+
+        Window rootWindow = DefaultRootWindow(display);
+        XRRScreenResources* resources = XRRGetScreenResourcesCurrent(display, rootWindow);
+        if (!resources) {
+            MonitorInfo fallback;
+            fallback.index = 0;
+            fallback.id = "default";
+            fallback.name = "default";
+            fallback.x = 0;
+            fallback.y = 0;
+            fallback.width = DisplayWidth(display, DefaultScreen(display));
+            fallback.height = DisplayHeight(display, DefaultScreen(display));
+            fallback.primary = true;
+            if (fallback.width <= 0) fallback.width = 1;
+            if (fallback.height <= 0) fallback.height = 1;
+            monitors.push_back(std::move(fallback));
+            return false;
+        }
+
+        RROutput primaryOutput = XRRGetOutputPrimary(display, rootWindow);
+
+        for (int i = 0; i < resources->noutput; ++i) {
+            RROutput output = resources->outputs[i];
+            XRROutputInfo* outputInfo = XRRGetOutputInfo(display, resources, output);
+            if (!outputInfo) {
+                continue;
+            }
+
+            if (outputInfo->connection == RR_Connected && outputInfo->crtc != None) {
+                XRRCrtcInfo* crtcInfo = XRRGetCrtcInfo(display, resources, outputInfo->crtc);
+                if (crtcInfo) {
+                    MonitorInfo monitor;
+                    monitor.index = static_cast<int32_t>(monitors.size());
+                    monitor.id = outputInfo->name ? std::string(outputInfo->name) : "X11 Monitor";
+                    monitor.name = monitor.id;
+                    monitor.x = crtcInfo->x;
+                    monitor.y = crtcInfo->y;
+                    monitor.width = crtcInfo->width;
+                    monitor.height = crtcInfo->height;
+                    monitor.primary = (output == primaryOutput);
+                    monitors.push_back(std::move(monitor));
+                    XRRFreeCrtcInfo(crtcInfo);
+                }
+            }
+
+            XRRFreeOutputInfo(outputInfo);
+        }
+
+        XRRFreeScreenResources(resources);
+
+        if (monitors.empty()) {
+            MonitorInfo fallback;
+            fallback.index = 0;
+            fallback.id = "default";
+            fallback.name = "default";
+            fallback.x = 0;
+            fallback.y = 0;
+            fallback.width = DisplayWidth(display, DefaultScreen(display));
+            fallback.height = DisplayHeight(display, DefaultScreen(display));
+            fallback.primary = true;
+            if (fallback.width <= 0) fallback.width = 1;
+            if (fallback.height <= 0) fallback.height = 1;
+            monitors.push_back(std::move(fallback));
+            return false;
+        }
+
+        for (size_t i = 0; i < monitors.size(); ++i) {
+            monitors[i].index = static_cast<int32_t>(i);
+        }
+
+        return true;
+    }
+
+}
+
 class X11PlatformInput : public IPlatformInput {
 
     ClipboardChangeCallback m_clipboardCallback;
     std::mutex clipboard_callback_mutex;
+    std::vector<MonitorInfo> m_monitors;
+    std::mutex m_monitorMutex;
+    int32_t m_currentMonitorIndex = 0;
 
     bool SetClipboardText(const std::string& text) override {
         FILE* pipe = popen("xclip -selection clipboard -i", "w");
@@ -339,6 +424,14 @@ class X11PlatformInput : public IPlatformInput {
             std::string details = displayEnv ? displayEnv : "(not set)";
             throw std::runtime_error("Failed to open X11 display. DISPLAY=" + details);
         }
+
+        LoadX11Monitors(m_display, m_monitors);
+        for (size_t i = 0; i < m_monitors.size(); ++i) {
+            if (m_monitors[i].primary) {
+                m_currentMonitorIndex = static_cast<int32_t>(i);
+                break;
+            }
+        }
     }
 
     ~X11PlatformInput() override {
@@ -366,8 +459,62 @@ class X11PlatformInput : public IPlatformInput {
         return true;
     }
 
+    std::vector<MonitorInfo> GetMonitors() override {
+        std::lock_guard<std::mutex> lock(m_monitorMutex);
+        return m_monitors;
+    }
+
+    void SetMonitors(const std::vector<MonitorInfo>& monitors) override {
+        std::lock_guard<std::mutex> lock(m_monitorMutex);
+        m_monitors = monitors;
+    }
+
+    bool SetCurrentMonitor(int32_t monitorIndex, int32_t width, int32_t height) override {
+        std::lock_guard<std::mutex> lock(m_monitorMutex);
+        if (monitorIndex < 0 || static_cast<size_t>(monitorIndex) >= m_monitors.size()) {
+            return false;
+        }
+
+        m_currentMonitorIndex = monitorIndex;
+        if (width > 0 && height > 0) {
+            m_monitors[static_cast<size_t>(monitorIndex)].width = width;
+            m_monitors[static_cast<size_t>(monitorIndex)].height = height;
+        }
+
+        return true;
+    }
+
+    const MonitorInfo& GetCurrentMonitor() const {
+        // Note: In a real app, this should ideally return a copy or be called under lock
+        if (m_monitors.empty()) {
+            static MonitorInfo fallbackMonitor{ 0, "default", "default", 0, 0, 1, 1, true };
+            return fallbackMonitor;
+        }
+
+        if (m_currentMonitorIndex < 0 || static_cast<size_t>(m_currentMonitorIndex) >= m_monitors.size()) {
+            return m_monitors.front();
+        }
+
+        return m_monitors[static_cast<size_t>(m_currentMonitorIndex)];
+    }
+
     void MoveMouseAbsolute(int32_t x, int32_t y) override {
-        XTestFakeMotionEvent(m_display, -1, x, y, CurrentTime);
+        MonitorInfo monitor;
+        {
+            std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(m_monitorMutex));
+            monitor = GetCurrentMonitor();
+        }
+
+        int32_t localX = x;
+        int32_t localY = y;
+        if (monitor.width > 0) {
+            localX = std::max(0, std::min(localX, monitor.width - 1));
+        }
+        if (monitor.height > 0) {
+            localY = std::max(0, std::min(localY, monitor.height - 1));
+        }
+
+        XTestFakeMotionEvent(m_display, 0, monitor.x + localX, monitor.y + localY, CurrentTime);
     }
 
     void MoveMouseRelative(int32_t x, int32_t y) override {

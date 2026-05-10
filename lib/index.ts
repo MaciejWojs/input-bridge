@@ -6,6 +6,37 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 export type ClipboardEventType = 'text' | 'files';
+export type KeyboardMethod = 'eis' | 'fallback';
+
+/**
+ * Basic monitor metadata structure used for setting monitors manually.
+ */
+export interface MonitorMetadata {
+    /** Native monitor identifier or output name. */
+    id: string;
+    /** Human-readable monitor name. */
+    name: string;
+    /** Stable session index used with `setCurrentMonitor()`. */
+    index: number;
+    /** Left edge in virtual desktop coordinates. */
+    x: number;
+    /** Top edge in virtual desktop coordinates. */
+    y: number;
+    /** Monitor width in pixels. */
+    width: number;
+    /** Monitor height in pixels. */
+    height: number;
+    /** Whether this is the primary/default monitor. */
+    primary?: boolean;
+}
+
+/**
+ * Describes a monitor exposed by the native backend.
+ */
+export interface MonitorInfo extends MonitorMetadata {
+    /** Whether this is the primary/default monitor. */
+    primary: boolean;
+}
 
 export interface ClipboardEvent {
     /**
@@ -19,11 +50,107 @@ export interface ClipboardEvent {
     data: string | string[];
 }
 
+export type InputEventType =
+    | 'mouse_move_relative'
+    | 'mouse_move_absolute'
+    | 'mouse_click'
+    | 'key_press'
+    | 'mouse_scroll'
+    | 'type_character';
+
+export interface InputEvent {
+    type: InputEventType;
+    x?: number;
+    y?: number;
+    button?: number;
+    down?: boolean;
+    keyCode?: number;
+    charCode?: number;
+    delta?: number;
+    domCode?: string;
+}
+
+/**
+ * Configures how keyboard-oriented APIs are routed by the native backend.
+ *
+ * `keyboardMethod` controls the preferred transport for `keyPressDOM()` and `typeString()`:
+ * - `eis` keeps the EIS path preferred when available.
+ * - `fallback` keeps the portal/notify path preferred for Unicode and raw keyboard input.
+ *
+ * `allowNotifyKeyboard` and `allowNotifyPointer` control whether the backend may fall back to
+ * portal notify calls when EIS is unavailable or lacks the required capability.
+ */
+export interface BackendMethods {
+    keyboardMethod?: KeyboardMethod;
+    allowNotifyKeyboard?: boolean;
+    allowNotifyPointer?: boolean;
+}
+
 /**
  * Interface representing the native input bridge for simulating hardware events.
  * Actions are queued and must be dispatched using `flush()`.
  */
 export interface IInputBridge {
+
+    /**
+     * Sets Linux portal input transport mode.
+     * 
+     * Supported values:
+     * - `notify`: legacy `Notify*` D-Bus calls
+     * - `eis`: request EIS transport via `ConnectToEIS`
+     * 
+     * @param mode - Transport mode (`notify` or `eis`).
+     * @returns `true` on success.
+     */
+    setInputMode(mode: 'notify' | 'eis'): boolean;
+
+    /**
+     * Returns currently selected Linux portal input transport mode.
+     */
+    getInputMode(): string;
+
+    /**
+     * Attempts to connect the active RemoteDesktop session to EIS.
+     * Must be called after successful `init()`.
+     */
+    connectToEIS(): boolean;
+
+    /**
+     * Configures how the backend routes keyboard and pointer input when EIS is available.
+     *
+     * @param options - Backend routing options.
+     * @returns `true` if the configuration was accepted.
+     */
+    setBackendMethods(options: BackendMethods): boolean;
+
+    /**
+     * Returns the current backend routing configuration.
+     *
+     * @returns The active backend routing options.
+     */
+    getBackendMethods(): Required<BackendMethods>;
+
+    /**
+     * Closes active EIS connection and returns to notify mode.
+     */
+    disconnectEIS(): void;
+
+    /**
+     * Indicates whether EIS channel is currently connected.
+     */
+    isEISConnected(): boolean;
+
+    /**
+     * Returns active Linux portal session handle (object path) when available.
+     * Useful for integrations with other native Node addons.
+     */
+    getPortalSessionHandle(): string | null;
+
+    /**
+     * Opens PipeWire remote for the current portal session and returns OS fd.
+     * Caller owns returned fd lifecycle.
+     */
+    openPipeWireRemoteFd(): number | null;
 
     /**
      * Sets the clipboard text (Unicode string).
@@ -108,10 +235,37 @@ export interface IInputBridge {
     getClipboardFilesRemote(): string[] | null;
 
     /**
+     * Returns the monitors known to the native backend.
+     *
+     * @returns A list of monitor descriptors.
+     */
+    getMonitors(): MonitorInfo[];
+
+    /**
+     * Manually sets the list of monitors in the native backend.
+     * This is particularly important for Linux Wayland backends to ensure 
+     * correct coordinate normalization when moving the mouse absolutely.
+     * 
+     * @param monitors - Array of monitor info objects.
+     */
+    setMonitors(monitors: MonitorMetadata[]): void;
+
+    /**
+     * Selects the active monitor used by `moveMouseAbsolute(x, y)`.
+     *
+     * @param index - Monitor index returned by `getMonitors()`.
+     * @param width - Current width of the monitor (updates resolution for normalization).
+     * @param height - Current height of the monitor (updates resolution for normalization).
+     * @returns `true` if the monitor was selected, `false` otherwise.
+     */
+    setCurrentMonitor(index: number, width: number, height: number): boolean;
+
+    /**
      * Asynchronously initializes the native input bridge.
-     * On Linux (Wayland), this requests a RemoteDesktop portal session and waits
-     * for the user to grant permission. Returns a resolved Promise on success,
-     * or rejects if the initialization times out (10s) or is denied.
+     * On Linux (Wayland), this runs the RemoteDesktop + ScreenCast portal flow and
+     * waits through `RemoteDesktop.Start` (streams negotiated) so `getMonitors()`
+     * and `openPipeWireRemoteFd()` see real data immediately after init. Resolves on
+     * success, rejects on timeout (about 45s) or denial.
      * On Windows, it resolves immediately.
      */
     init(): Promise<void>;
@@ -132,15 +286,17 @@ export interface IInputBridge {
     moveMouseRelative(x: number, y: number): void;
 
     /**
-     * Queues an absolute mouse movement to a specific screen coordinate.
+     * Queues an absolute mouse movement within the currently selected monitor.
+     * Coordinates are local to that monitor (`0,0` = top-left of active monitor).
      * 
-     * @param x - The absolute X coordinate.
-     * @param y - The absolute Y coordinate.
+     * @param x - The local X coordinate on the active monitor.
+     * @param y - The local Y coordinate on the active monitor.
      * @throws {TypeError} If `x` or `y` is not a number.
      * 
      * @example
      * ```typescript
-     * bridge.moveMouseAbsolute(1920 / 2, 1080 / 2); // move to center of a 1080p screen
+     * bridge.setCurrentMonitor(0);
+     * bridge.moveMouseAbsolute(960, 540); // center of selected 1920x1080 monitor
      * bridge.flush();
      * ```
      */
@@ -305,6 +461,42 @@ export interface IInputBridge {
     offClipboard(): void;
 
     /**
+     * Registers a callback to receive pushed input events (keyboard/mouse) from the platform.
+     * The callback receives an `InputEvent` object describing the event.
+     */
+    onInput(callback: (event: InputEvent) => void): void;
+
+    /**
+     * Removes the registered input event listener.
+     */
+    offInput(): void;
+
+    /**
+     * Starts global input detection (hooks) on supported platforms (Windows).
+     * Needs to be called to start receiving events via `onInput`.
+     * 
+     * @returns `true` if detection started successfully, `false` otherwise.
+     * 
+     * @platform Windows: Supported. Linux: Not implemented.
+     */
+    startInputDetection(): boolean;
+
+    /**
+     * Stops global input detection (hooks) on supported platforms.
+     * 
+     * @platform Windows: Supported. Linux: Not implemented.
+     */
+    stopInputDetection(): void;
+
+    /**
+     * Sets the distance threshold for optimizing detected input moves (hooks).
+     * Movements smaller than this threshold will be filtered out.
+     * 
+     * @param distanceThreshold - The distance threshold in pixels. 0 disables optimization.
+     */
+    optimizeInputDetection(distanceThreshold: number): void;
+
+    /**
      * Simulates a hardware key press using a standard `KeyboardEvent.code` string, 
      * acting as a universal Plug-and-Play mechanism.
      * 
@@ -335,6 +527,7 @@ export interface IInputBridge {
 
 interface INativeAddon {
     InputBridge: new () => IInputBridge;
+    getCursorType: () => string;
 }
 
 const rootDir = path.resolve(__dirname, '..');
@@ -348,6 +541,9 @@ import { mapDomCodeToNativeTarget } from './dom_mapper.js';
  * - `autoFlush`: If true, automatically calls `flush()` after every input action.
  *   Disable this if you want to batch multiple actions together for performance.
  *   @default false
+ * - `flushIntervalMs`: If set to a positive number, automatically flushes queued input events
+ *   at this interval (in milliseconds). If 0 or negative, auto-flush is disabled.
+ *   @default 0 (disabled)
  */
 export interface InputBridgeOptions {
     /**
@@ -356,6 +552,14 @@ export interface InputBridgeOptions {
      * @default false
      */
     autoFlush?: boolean;
+
+    /**
+     * If set to a positive number, automatically flushes queued input events
+     * at this interval (in milliseconds). Helps prevent blocking Node.js event loop
+     * by batching events and flushing them periodically.
+     * @default 0 (disabled)
+     */
+    flushIntervalMs?: number;
 }
 
 /**
@@ -371,14 +575,60 @@ export class InputBridge implements IInputBridge {
 
     private nativeBridge: IInputBridge;
     public autoFlush: boolean;
+    private flushIntervalMs: number;
+    private flushTimer: NodeJS.Timeout | null = null;
 
     constructor(options?: InputBridgeOptions) {
         this.nativeBridge = new native.InputBridge();
         this.autoFlush = options?.autoFlush ?? false;
+        this.flushIntervalMs = options?.flushIntervalMs ?? 0;
+
+        // Start auto-flush timer if interval is specified
+        if (this.flushIntervalMs > 0) {
+            this.flushTimer = setInterval(() => {
+                this.flush();
+            }, this.flushIntervalMs);
+        }
     }
 
     async init(): Promise<void> {
         return this.nativeBridge.init();
+    }
+
+    setInputMode(mode: 'notify' | 'eis'): boolean {
+        return this.nativeBridge.setInputMode(mode);
+    }
+
+    getInputMode(): string {
+        return this.nativeBridge.getInputMode();
+    }
+
+    connectToEIS(): boolean {
+        return this.nativeBridge.connectToEIS();
+    }
+
+    setBackendMethods(options: BackendMethods): boolean {
+        return this.nativeBridge.setBackendMethods(options);
+    }
+
+    getBackendMethods(): Required<BackendMethods> {
+        return this.nativeBridge.getBackendMethods();
+    }
+
+    disconnectEIS(): void {
+        this.nativeBridge.disconnectEIS();
+    }
+
+    isEISConnected(): boolean {
+        return this.nativeBridge.isEISConnected();
+    }
+
+    getPortalSessionHandle(): string | null {
+        return this.nativeBridge.getPortalSessionHandle();
+    }
+
+    openPipeWireRemoteFd(): number | null {
+        return this.nativeBridge.openPipeWireRemoteFd();
     }
 
     moveMouseRelative(x: number, y: number): void {
@@ -441,6 +691,37 @@ export class InputBridge implements IInputBridge {
         this.nativeBridge.offClipboard();
     }
 
+    onInput(callback: (event: InputEvent) => void): void {
+        this.nativeBridge.onInput(callback as any);
+    }
+
+    offInput(): void {
+        this.nativeBridge.offInput();
+    }
+
+    startInputDetection(): boolean {
+        return this.nativeBridge.startInputDetection();
+    }
+
+    stopInputDetection(): void {
+        this.nativeBridge.stopInputDetection();
+    }
+
+    optimizeInputDetection(distanceThreshold: number): void {
+        this.nativeBridge.optimizeInputDetection(distanceThreshold);
+    }
+
+    /**
+     * Stops the auto-flush timer if it is running.
+     * Call this before discarding the instance to clean up resources.
+     */
+    stopAutoFlush(): void {
+        if (this.flushTimer !== null) {
+            clearInterval(this.flushTimer);
+            this.flushTimer = null;
+        }
+    }
+
     keyPressDOM(domCode: string, down: boolean): boolean {
         const rawCode = mapDomCodeToNativeTarget(domCode);
         if (rawCode !== null) {
@@ -474,6 +755,38 @@ export class InputBridge implements IInputBridge {
     getClipboardFilesRemote(): string[] | null {
         return this.nativeBridge.getClipboardFilesRemote();
     }
+
+    getMonitors(): MonitorInfo[] {
+        return this.nativeBridge.getMonitors();
+    }
+
+    setMonitors(monitors: MonitorMetadata[]): void {
+        this.nativeBridge.setMonitors(monitors);
+    }
+
+    setCurrentMonitor(index: number, width: number, height: number): boolean {
+        return this.nativeBridge.setCurrentMonitor(index, width, height);
+    }
 }
 
-export default { InputBridge };
+/**
+ * Returns the name of the system pointer cursor as a CSS-compatible string
+ * (for example `default`, `pointer`, `text`, `crosshair`, `move`, `wait`,
+ * `grab`, `nwse-resize`, ...).
+ *
+ * Behavior per platform:
+ * - Windows: inspects the global cursor via `GetCursorInfo` and maps the
+ *   standard system cursors to their CSS equivalents.
+ * - Linux X11 (when built with `use_x11_backend=1`): reads the active cursor
+ *   name through the Xfixes extension and maps known X cursor names to CSS.
+ * - Linux Wayland (or portal-only build): returns `default`. Wayland does not
+ *   expose the global pointer cursor to background processes.
+ * - Other platforms: returns `default`.
+ *
+ * Unknown or application-defined cursors fall back to `default`.
+ */
+export function getCursorType(): string {
+    return native.getCursorType();
+}
+
+export default { InputBridge, getCursorType };
