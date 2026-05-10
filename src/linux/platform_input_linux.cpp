@@ -1313,10 +1313,10 @@ class PlatformInputLinux : public IPlatformInput {
                         g_variant_unref(token_v);
                     }
                 }
-                // We stop here and let the capture addon trigger 'Start' so it can receive 
-                // the monitor stream info. We mark session as ready so init() resolves.
-                self->is_session_ready.store(true);
-                self->session_cv.notify_all();
+                // Eager Start: negotiate screen cast streams immediately so GetMonitors() /
+                // OpenPipeWireRemoteFd callers see real PipeWire node IDs after init().
+                // screen-capture can still reuse the session; duplicate Start is handled there.
+                StartSession(self);
             } else {
                 std::cerr << "Screen capture permission denied. Response: " << response << std::endl;
                 self->session_cv.notify_all();
@@ -1493,7 +1493,7 @@ class PlatformInputLinux : public IPlatformInput {
             g_error_free(error);
             {
                 std::lock_guard<std::mutex> lock(self->session_mutex);
-                self->is_session_ready = false;
+                self->is_session_ready.store(false, std::memory_order_relaxed);
             }
             self->session_cv.notify_all();
         } else {

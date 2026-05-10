@@ -262,9 +262,10 @@ export interface IInputBridge {
 
     /**
      * Asynchronously initializes the native input bridge.
-     * On Linux (Wayland), this requests a RemoteDesktop portal session and waits
-     * for the user to grant permission. Returns a resolved Promise on success,
-     * or rejects if the initialization times out (10s) or is denied.
+     * On Linux (Wayland), this runs the RemoteDesktop + ScreenCast portal flow and
+     * waits through `RemoteDesktop.Start` (streams negotiated) so `getMonitors()`
+     * and `openPipeWireRemoteFd()` see real data immediately after init. Resolves on
+     * success, rejects on timeout (about 45s) or denial.
      * On Windows, it resolves immediately.
      */
     init(): Promise<void>;

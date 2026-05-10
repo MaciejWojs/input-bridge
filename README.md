@@ -38,7 +38,7 @@ bridge.flush();
 
 ## API overview
 
-- `init()` - initializes the native bridge and requests permissions on Linux
+- `init()` - initializes the native bridge; on Wayland runs the full portal flow through `RemoteDesktop.Start` so monitor list is ready for screen-capture pairing
 - `moveMouseRelative(x, y)` - queue a relative mouse movement
 - `moveMouseAbsolute(x, y)` - queue an absolute mouse movement
 - `mouseClick(button, down)` - queue a mouse button press/release
