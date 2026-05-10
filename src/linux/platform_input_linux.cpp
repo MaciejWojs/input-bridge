@@ -2009,10 +2009,10 @@ class PlatformInputLinux : public IPlatformInput {
         // double localX = std::max(0.0, std::min(static_cast<double>(x), static_cast<double>(monitor.width - 1)));
         // double localY = std::max(0.0, std::min(static_cast<double>(y), static_cast<double>(monitor.height - 1)));
         
-        // double localX = x;
-        // double localY = y;
-        double localX = (double)x / (double)monitor.width;
-        double localY = (double)y / (double)monitor.height;
+        double localX = (double)x ;
+        double localY = (double)y ; 
+        // double localX = (double)x / (double)monitor.width;
+        // double localY = (double)y / (double)monitor.height;
 
 
 
