@@ -527,6 +527,7 @@ export interface IInputBridge {
 
 interface INativeAddon {
     InputBridge: new () => IInputBridge;
+    getCursorType: () => string;
 }
 
 const rootDir = path.resolve(__dirname, '..');
@@ -768,4 +769,24 @@ export class InputBridge implements IInputBridge {
     }
 }
 
-export default { InputBridge };
+/**
+ * Returns the name of the system pointer cursor as a CSS-compatible string
+ * (for example `default`, `pointer`, `text`, `crosshair`, `move`, `wait`,
+ * `grab`, `nwse-resize`, ...).
+ *
+ * Behavior per platform:
+ * - Windows: inspects the global cursor via `GetCursorInfo` and maps the
+ *   standard system cursors to their CSS equivalents.
+ * - Linux X11 (when built with `use_x11_backend=1`): reads the active cursor
+ *   name through the Xfixes extension and maps known X cursor names to CSS.
+ * - Linux Wayland (or portal-only build): returns `default`. Wayland does not
+ *   expose the global pointer cursor to background processes.
+ * - Other platforms: returns `default`.
+ *
+ * Unknown or application-defined cursors fall back to `default`.
+ */
+export function getCursorType(): string {
+    return native.getCursorType();
+}
+
+export default { InputBridge, getCursorType };

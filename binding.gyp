@@ -30,7 +30,8 @@
           "libraries": [
             "-lX11",
             "-lXtst",
-            "-lXrandr"
+            "-lXrandr",
+            "-lXfixes"
           ]
         }],
 

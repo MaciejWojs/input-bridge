@@ -56,6 +56,29 @@ bridge.flush();
 - `flush()` - execute all queued input events
 - `setLogger(callback)` - receive native backend log messages
 
+In addition to the `InputBridge` class, the package exports a standalone
+`getCursorType()` function that returns the current system pointer cursor as
+a CSS-compatible name.
+
+```ts
+import { getCursorType } from '@maciejwojs/input-bridge';
+
+console.log(getCursorType()); // "default", "pointer", "text", ...
+```
+
+Behavior per platform:
+
+- Windows uses `GetCursorInfo` and maps the standard system cursors to CSS
+  values such as `default`, `pointer`, `text`, `crosshair`, `move`, `wait`,
+  `progress`, `help`, `not-allowed`, and the `*-resize` family.
+- Linux X11 (built with `use_x11_backend=1`) reads the active cursor name via
+  the Xfixes extension and maps known X cursor themes to CSS.
+- Linux Wayland and the default portal-only build return `default`. Wayland
+  intentionally hides the global pointer cursor from background processes, so
+  inspecting the cursor of another surface is not possible without integrating
+  with a PipeWire screencast metadata stream.
+- Application-defined or unknown cursors fall back to `default`.
+
 ## Build and development
 
 ```bash
@@ -99,6 +122,7 @@ Built artifacts are placed in `prebuilds/` and loaded automatically by `lib/inde
 - `src/linux/platform_input_linux.cpp` - Linux backend
 - `src/platform_input_stub.cpp` - fallback implementation
 - `src/platform_input.hpp` - shared backend interface and event queue
+- `src/cursor/` - standalone module exposing `getCursorType()` (Win32 / X11 + Xfixes / Wayland stub)
 - `binding.gyp` - native addon build configuration
 
 ## Notes
