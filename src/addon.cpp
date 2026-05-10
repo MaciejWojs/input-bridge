@@ -51,6 +51,15 @@ typedef PlatformInputLinux PlatformInputImpl;
 typedef PlatformInputStub PlatformInputImpl;
 #endif
 
+#if defined(_WIN32)
+#include "cursor/cursor_win.cpp"
+#elif defined(__linux__)
+#include "cursor/cursor_linux_dispatch.cpp"
+#else
+#include "cursor/cursor_stub.cpp"
+#endif
+#include "cursor/cursor_exports.cpp"
+
 std::unique_ptr<IPlatformInput> CreatePlatformInput() {
     return std::make_unique<PlatformInputImpl>();
 }
@@ -789,7 +798,9 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
 Napi::Object InitAll(Napi::Env env, Napi::Object exports) {
     // Print compile-time generated revision token on module load
     std::cout << "[InputBridge] revision: " << revision_token.data() << std::endl;
-    return InputBridge::Init(env, exports);
+    InputBridge::Init(env, exports);
+    cursor_exports::Register(env, exports);
+    return exports;
 }
 
 NODE_API_MODULE(input_bridge_addon, InitAll)
