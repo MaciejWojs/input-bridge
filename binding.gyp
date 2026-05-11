@@ -36,8 +36,11 @@
         }],
 
         ["OS=='linux' and use_x11_backend!=1", {
-          "defines+": [
-            "INPUT_BRIDGE_DISABLE_LIBEI"
+          "sources+": [
+            "src/linux/platform_input_linux.cpp",
+            "src/linux/linux_platform_factory.cpp",
+            "src/linux/linux_uinput_injector.cpp",
+            "src/linux/linux_wl_clipboard.cpp"
           ],
           "cflags_cc": [
             "<!@(pkg-config --cflags gio-2.0 gio-unix-2.0 glib-2.0 gobject-2.0 xkbcommon libei-1.0)"

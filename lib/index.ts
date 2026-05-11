@@ -265,7 +265,9 @@ export interface IInputBridge {
      * On Linux (Wayland), this runs the RemoteDesktop + ScreenCast portal flow and
      * waits through `RemoteDesktop.Start` (streams negotiated) so `getMonitors()`
      * and `openPipeWireRemoteFd()` see real data immediately after init. Resolves on
-     * success, rejects on timeout (about 45s) or denial.
+     * success, rejects on timeout (about 45s) or denial. If the portal is not
+     * available, Linux falls back to `libei` socket (`INPUT_BRIDGE_EI_SOCKET`) and
+     * finally `/dev/uinput`; in fallback mode PipeWire/portal session APIs are unavailable.
      * On Windows, it resolves immediately.
      */
     init(): Promise<void>;
@@ -624,11 +626,19 @@ export class InputBridge implements IInputBridge {
     }
 
     getPortalSessionHandle(): string | null {
-        return this.nativeBridge.getPortalSessionHandle();
+        try {
+            return this.nativeBridge.getPortalSessionHandle();
+        } catch {
+            return null;
+        }
     }
 
     openPipeWireRemoteFd(): number | null {
-        return this.nativeBridge.openPipeWireRemoteFd();
+        try {
+            return this.nativeBridge.openPipeWireRemoteFd();
+        } catch {
+            return null;
+        }
     }
 
     moveMouseRelative(x: number, y: number): void {
