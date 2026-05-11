@@ -43,8 +43,7 @@ typedef PlatformInputWin PlatformInputImpl;
 #include "linux/platform_input_x11.cpp"
 typedef X11PlatformInput PlatformInputImpl;
 #else
-#include "linux/platform_input_linux.cpp"
-typedef PlatformInputLinux PlatformInputImpl;
+#include "linux/linux_platform_factory.hpp"
 #endif
 #else
 #include "platform_input_stub.cpp"
@@ -61,7 +60,11 @@ typedef PlatformInputStub PlatformInputImpl;
 #include "cursor/cursor_exports.cpp"
 
 std::unique_ptr<IPlatformInput> CreatePlatformInput() {
+#if defined(__linux__) && !defined(USE_X11_BACKEND)
+    return CreateLinuxPlatformInputFromFactory();
+#else
     return std::make_unique<PlatformInputImpl>();
+#endif
 }
 
 static Napi::Object MonitorInfoToJs(Napi::Env env, const MonitorInfo& monitor) {
@@ -318,6 +321,9 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
         auto fd = m_queue.GetPlatform()->OpenPipeWireRemoteFd(error_msg);
         if (!fd) {
             if (!error_msg.empty()) {
+                if (error_msg == "PipeWire remote fd is available only with portal backend.") {
+                    return info.Env().Null();
+                }
                 Napi::Error::New(info.Env(), error_msg).ThrowAsJavaScriptException();
                 return info.Env().Undefined();
             }

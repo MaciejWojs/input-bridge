@@ -1,5 +1,7 @@
 #include "../platform_input.hpp"
 #include "../key_translator.hpp"
+#include "linux_uinput_injector.hpp"
+#include "linux_wl_clipboard.hpp"
 #include <iostream>
 #include <string>
 #include <sstream>
@@ -20,6 +22,7 @@
 #include <functional>
 #include <dlfcn.h>
 #include <poll.h>
+#include <regex>
 
 #if defined(INPUT_BRIDGE_DISABLE_LIBEI)
 #pragma message(">>> COMPILING WITH DISABLED LIBEI SUPPORT<<<")
@@ -48,6 +51,12 @@ class PlatformInputLinux : public IPlatformInput {
     enum class InputMode {
         Notify,
         EIS
+    };
+
+    enum class ActiveBackend {
+        Portal,
+        LibeiSocket,
+        Uinput
     };
 
     enum class KeyboardRouting {
@@ -100,6 +109,13 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     bool ConnectToEIS(std::string& error_msg) override {
+        if (m_activeBackend == ActiveBackend::LibeiSocket && eis_connected.load(std::memory_order_relaxed)) {
+            return true;
+        }
+        if (m_activeBackend != ActiveBackend::Portal) {
+            error_msg = "Portal ConnectToEIS is unavailable for the active backend.";
+            return false;
+        }
 #if !INPUT_BRIDGE_HAS_LIBEI
         error_msg = "EIS/libei support is not available in this build. Input will stay on notify mode.";
         return false;
@@ -303,6 +319,11 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     bool SetClipboardText(const std::string& text) override {
+        if (m_activeBackend != ActiveBackend::Portal) {
+            const bool ok = m_wlClipboard.SetText(text);
+            if (ok) EmitClipboardChange("text", {}, text);
+            return ok;
+        }
         if (!ClipboardAvailable()) {
             LogClipboardUnavailable("SetClipboardText");
             return false;
@@ -349,6 +370,9 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     std::optional<std::string> GetClipboardText() override {
+        if (m_activeBackend != ActiveBackend::Portal) {
+            return m_wlClipboard.GetText();
+        }
         if (!ClipboardAvailable()) {
             LogClipboardUnavailable("GetClipboardText");
             return std::nullopt;
@@ -400,6 +424,11 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     bool SetClipboardFiles(const std::vector<std::string>& files) override {
+        if (m_activeBackend != ActiveBackend::Portal) {
+            const bool ok = m_wlClipboard.SetFiles(files);
+            if (ok) EmitClipboardChange("files", files, {});
+            return ok;
+        }
         if (!ClipboardAvailable()) {
             LogClipboardUnavailable("SetClipboardFiles");
             return false;
@@ -451,6 +480,9 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     std::optional<std::vector<std::string>> GetClipboardFiles() override {
+        if (m_activeBackend != ActiveBackend::Portal) {
+            return m_wlClipboard.GetFiles();
+        }
         if (!ClipboardAvailable()) {
             LogClipboardUnavailable("GetClipboardFiles");
             return std::nullopt;
@@ -514,10 +546,16 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     bool SetClipboardFilesRemote(const std::vector<std::string>& files) override {
+        if (m_activeBackend != ActiveBackend::Portal) {
+            return false;
+        }
         return SetClipboardFiles(files);
     }
 
     std::optional<std::vector<std::string>> GetClipboardFilesRemote() override {
+        if (m_activeBackend != ActiveBackend::Portal) {
+            return std::nullopt;
+        }
         return GetClipboardFiles();
     }
 
@@ -888,6 +926,7 @@ class PlatformInputLinux : public IPlatformInput {
 
     private:
     GDBusConnection* connection = nullptr;
+    ActiveBackend m_activeBackend = ActiveBackend::Portal;
     std::string session_handle;
     std::atomic<bool> is_session_ready = false;
     bool m_batchMode = false;
@@ -912,6 +951,8 @@ class PlatformInputLinux : public IPlatformInput {
     std::mutex session_mutex;
     std::condition_variable session_cv;
     std::atomic<bool> is_session_started = false;
+    std::unique_ptr<LinuxUinputInjector> m_uinputInjector;
+    LinuxWlClipboard m_wlClipboard;
 
     std::string GetSessionHandle() {
         std::lock_guard<std::mutex> lock(session_mutex);
@@ -919,6 +960,9 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     std::optional<std::string> GetPortalSessionHandle() override {
+        if (m_activeBackend != ActiveBackend::Portal) {
+            return std::nullopt;
+        }
         const std::string handle = GetSessionHandle();
         if (handle.empty()) {
             return std::nullopt;
@@ -939,6 +983,66 @@ class PlatformInputLinux : public IPlatformInput {
         return monitor;
     }
 
+    bool TryLoadHyprlandMonitors() {
+        if (!std::getenv("HYPRLAND_INSTANCE_SIGNATURE")) {
+            return false;
+        }
+
+        FILE* pipe = popen("hyprctl -j monitors 2>/dev/null", "r");
+        if (!pipe) {
+            return false;
+        }
+
+        std::string json;
+        char buffer[1024];
+        while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+            json += buffer;
+        }
+        const int status = pclose(pipe);
+        if (status != 0 || json.empty()) {
+            return false;
+        }
+
+        std::vector<MonitorInfo> parsed;
+        std::regex object_regex("\\{[^\\{\\}]*\\}");
+        std::regex id_regex("\"id\"\\s*:\\s*(\\d+)");
+        std::regex name_regex("\"name\"\\s*:\\s*\"([^\"]+)\"");
+        std::regex x_regex("\"x\"\\s*:\\s*(-?\\d+)");
+        std::regex y_regex("\"y\"\\s*:\\s*(-?\\d+)");
+        std::regex w_regex("\"width\"\\s*:\\s*(\\d+)");
+        std::regex h_regex("\"height\"\\s*:\\s*(\\d+)");
+        std::regex focused_regex("\"focused\"\\s*:\\s*(true|false)");
+
+        auto begin = std::sregex_iterator(json.begin(), json.end(), object_regex);
+        auto end = std::sregex_iterator();
+        for (auto it = begin; it != end; ++it) {
+            const std::string obj = it->str();
+            std::smatch m;
+            MonitorInfo monitor;
+            monitor.index = static_cast<int32_t>(parsed.size());
+            if (std::regex_search(obj, m, id_regex)) monitor.id = m[1].str();
+            if (std::regex_search(obj, m, name_regex)) monitor.name = m[1].str();
+            if (std::regex_search(obj, m, x_regex)) monitor.x = std::stoi(m[1].str());
+            if (std::regex_search(obj, m, y_regex)) monitor.y = std::stoi(m[1].str());
+            if (std::regex_search(obj, m, w_regex)) monitor.width = std::stoi(m[1].str());
+            if (std::regex_search(obj, m, h_regex)) monitor.height = std::stoi(m[1].str());
+            if (std::regex_search(obj, m, focused_regex)) monitor.primary = m[1].str() == "true";
+            if (monitor.width > 0 && monitor.height > 0) {
+                if (monitor.id.empty()) monitor.id = std::to_string(monitor.index);
+                if (monitor.name.empty()) monitor.name = "Hyprland monitor";
+                parsed.push_back(std::move(monitor));
+            }
+        }
+
+        if (parsed.empty()) return false;
+
+        std::lock_guard<std::mutex> lock(m_monitorMutex);
+        m_monitors = std::move(parsed);
+        m_currentMonitorIndex = std::stoi(m_monitors.front().id);
+        UpdateVirtualDesktopBounds();
+        return true;
+    }
+
     const MonitorInfo& GetCurrentMonitor() const {
         // Szukamy monitora, którego id (jako string) odpowiada zapisanemu m_currentMonitorIndex (PipeWire ID)
         std::string targetId = std::to_string(m_currentMonitorIndex);
@@ -953,12 +1057,124 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     bool EnsureStarted() {
+        if (m_activeBackend != ActiveBackend::Portal) {
+            return is_session_ready.load(std::memory_order_relaxed);
+        }
         if (is_session_started.load(std::memory_order_relaxed)) return true;
         if (!is_session_ready.load(std::memory_order_relaxed)) return false;
 
         StartSession(this);
         std::unique_lock<std::mutex> lock(session_mutex);
         return session_cv.wait_for(lock, std::chrono::seconds(5), [this] { return this->is_session_started.load(std::memory_order_relaxed); });
+    }
+
+    static std::string ReadBackendMode() {
+        if (const char* mode = std::getenv("INPUT_BRIDGE_LINUX_BACKEND")) {
+            return mode;
+        }
+        return "auto";
+    }
+
+    bool TryInitializeLibeiSocket(std::string& error_msg) {
+#if !INPUT_BRIDGE_HAS_LIBEI
+        error_msg = "Libei socket backend is not available in this build.";
+        return false;
+#else
+        const char* socket_path = std::getenv("INPUT_BRIDGE_EI_SOCKET");
+        if (!socket_path || std::string(socket_path).empty()) {
+            error_msg = "INPUT_BRIDGE_EI_SOCKET is not set.";
+            return false;
+        }
+
+        if (m_eis.context || m_eis.device || m_eis.seat) {
+            ReleaseEISState();
+        }
+
+        m_eis.context = ei_new_sender(this);
+        if (!m_eis.context) {
+            error_msg = "Failed to create libei sender context.";
+            return false;
+        }
+
+        ei_configure_name(m_eis.context, "input-bridge");
+        if (ei_setup_backend_socket(m_eis.context, socket_path) < 0) {
+            ei_unref(m_eis.context);
+            m_eis.context = nullptr;
+            error_msg = "ei_setup_backend_socket failed for INPUT_BRIDGE_EI_SOCKET.";
+            return false;
+        }
+
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (std::chrono::steady_clock::now() < deadline) {
+            EISDispatchPending();
+            if (HasEISDevice()) {
+                break;
+            }
+            pollfd pfd{};
+            pfd.fd = ei_get_fd(m_eis.context);
+            pfd.events = POLLIN;
+            pfd.revents = 0;
+            if (pfd.fd < 0) {
+                break;
+            }
+            poll(&pfd, 1, 50);
+        }
+
+        EISDispatchPending();
+        if (!HasEISDevice()) {
+            ReleaseEISState();
+            error_msg = "Timed out waiting for libei socket device readiness.";
+            return false;
+        }
+
+        m_activeBackend = ActiveBackend::LibeiSocket;
+        is_session_ready.store(true, std::memory_order_relaxed);
+        is_session_started.store(true, std::memory_order_relaxed);
+        eis_connected.store(true, std::memory_order_relaxed);
+        input_mode = InputMode::EIS;
+        return true;
+#endif
+    }
+
+    bool TryInitializeUinput(std::string& error_msg) {
+        m_uinputInjector = std::make_unique<LinuxUinputInjector>();
+        if (!m_uinputInjector->Initialize(error_msg)) {
+            m_uinputInjector.reset();
+            return false;
+        }
+        m_activeBackend = ActiveBackend::Uinput;
+        is_session_ready.store(true, std::memory_order_relaxed);
+        is_session_started.store(true, std::memory_order_relaxed);
+        return true;
+    }
+
+    bool TryInitializeFallback(std::string& error_msg, const std::string& reason) {
+        const std::string mode = ReadBackendMode();
+        std::string libei_error;
+        std::string uinput_error;
+
+        if ((mode == "auto" || mode == "libei-socket") && TryInitializeLibeiSocket(libei_error)) {
+            TryLoadHyprlandMonitors();
+            std::cerr << "Portal unavailable (" << reason << "). Using libei socket backend." << std::endl;
+            return true;
+        }
+
+        if ((mode == "auto" || mode == "uinput") && TryInitializeUinput(uinput_error)) {
+            TryLoadHyprlandMonitors();
+            std::cerr << "Portal unavailable (" << reason << "). Using uinput backend." << std::endl;
+            return true;
+        }
+
+        std::ostringstream oss;
+        oss << "Failed to initialize Linux backend. portal_reason=" << reason;
+        if (!libei_error.empty()) {
+            oss << "; libei_socket=" << libei_error;
+        }
+        if (!uinput_error.empty()) {
+            oss << "; uinput=" << uinput_error;
+        }
+        error_msg = oss.str();
+        return false;
     }
 
     void UpdateVirtualDesktopBounds() {
@@ -1707,6 +1923,14 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     bool Initialize(std::string& error_msg) override {
+        const std::string mode = ReadBackendMode();
+        if (mode == "uinput") {
+            return TryInitializeUinput(error_msg);
+        }
+        if (mode == "libei-socket") {
+            return TryInitializeLibeiSocket(error_msg);
+        }
+
         std::promise<bool> dbus_ready;
         auto dbus_future = dbus_ready.get_future();
 
@@ -1765,8 +1989,7 @@ class PlatformInputLinux : public IPlatformInput {
             if (loop_thread.joinable()) {
                 loop_thread.join();
             }
-            error_msg = "Failed to initialize DBus thread";
-            return false;
+            return TryInitializeFallback(error_msg, "Failed to initialize DBus thread");
         }
 
         is_running = true;
@@ -1812,9 +2035,9 @@ class PlatformInputLinux : public IPlatformInput {
         );
 
         if (error != nullptr) {
-            error_msg = std::string("Failed to call CreateSession: ") + error->message;
+            const std::string portal_error = std::string("Failed to call CreateSession: ") + error->message;
             g_error_free(error);
-            return false;
+            return TryInitializeFallback(error_msg, portal_error);
         } else {
             const gchar* request_path = nullptr;
             g_variant_get(result, "(&o)", &request_path);
@@ -1826,10 +2049,10 @@ class PlatformInputLinux : public IPlatformInput {
             std::unique_lock<std::mutex> lock(session_mutex);
             if (session_cv.wait_for(lock, std::chrono::seconds(45), [this] { return this->is_session_ready.load(std::memory_order_relaxed); })) {
                 std::cout << "Portal authorized immediately! JS code can continue." << std::endl;
+                m_activeBackend = ActiveBackend::Portal;
                 return true;
             } else {
-                error_msg = "Timeout expired or was denied! Authorization failed.";
-                return false;
+                return TryInitializeFallback(error_msg, "Timeout expired or was denied! Authorization failed.");
             }
         }
     }
@@ -1844,6 +2067,10 @@ class PlatformInputLinux : public IPlatformInput {
 
     ~PlatformInputLinux() {
         DisconnectEIS();
+        if (m_uinputInjector) {
+            m_uinputInjector->Shutdown();
+            m_uinputInjector.reset();
+        }
         if (main_loop) {
             g_main_loop_quit(main_loop);
             if (loop_thread.joinable()) {
@@ -1866,6 +2093,10 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     std::optional<int> OpenPipeWireRemoteFd(std::string& error_msg) override {
+        if (m_activeBackend != ActiveBackend::Portal) {
+            error_msg = "PipeWire remote fd is available only with portal backend.";
+            return std::nullopt;
+        }
         if (!is_session_ready.load(std::memory_order_relaxed)) {
             error_msg = "Session is not ready. Call init() and wait for portal authorization first.";
             return std::nullopt;
@@ -1928,6 +2159,10 @@ class PlatformInputLinux : public IPlatformInput {
 
     void MoveMouseRelative(int32_t x, int32_t y) override {
         if (!EnsureStarted()) return;
+        if (m_activeBackend == ActiveBackend::Uinput && m_uinputInjector) {
+            m_uinputInjector->MoveRelative(x, y);
+            return;
+        }
 #if INPUT_BRIDGE_HAS_LIBEI
         if (eis_connected.load(std::memory_order_relaxed)) {
             EISDispatchPending();
@@ -1941,6 +2176,8 @@ class PlatformInputLinux : public IPlatformInput {
             }
         }
 #endif
+
+        if (m_activeBackend != ActiveBackend::Portal) return;
 
         if (!allow_notify_pointer) {
             Log("Pointer routing requested but notify fallback is disabled.");
@@ -1996,6 +2233,15 @@ class PlatformInputLinux : public IPlatformInput {
 
     void MoveMouseAbsolute(int32_t x, int32_t y) override {
         if (!EnsureStarted()) return;
+        if (m_activeBackend == ActiveBackend::Uinput && m_uinputInjector) {
+            MonitorInfo monitor;
+            {
+                std::lock_guard<std::mutex> lock(m_monitorMutex);
+                monitor = GetCurrentMonitor();
+            }
+            m_uinputInjector->MoveAbsolute(x, y, monitor.width, monitor.height);
+            return;
+        }
 
         MonitorInfo monitor;
         {
@@ -2043,6 +2289,7 @@ class PlatformInputLinux : public IPlatformInput {
         }
 #endif
 
+        if (m_activeBackend != ActiveBackend::Portal) return;
         if (!allow_notify_pointer) return;
 
         const std::string session_handle_str = GetSessionHandle();
@@ -2140,6 +2387,10 @@ class PlatformInputLinux : public IPlatformInput {
 
     void MouseClick(int32_t button, bool down) override {
         if (!EnsureStarted()) return;
+        if (m_activeBackend == ActiveBackend::Uinput && m_uinputInjector) {
+            m_uinputInjector->MouseClick(button, down);
+            return;
+        }
 #if INPUT_BRIDGE_HAS_LIBEI
         if (eis_connected.load(std::memory_order_relaxed)) {
             EISDispatchPending();
@@ -2152,6 +2403,8 @@ class PlatformInputLinux : public IPlatformInput {
             }
         }
 #endif
+
+        if (m_activeBackend != ActiveBackend::Portal) return;
 
         const std::string session_handle = GetSessionHandle();
         GVariantBuilder options_builder;
@@ -2207,20 +2460,24 @@ class PlatformInputLinux : public IPlatformInput {
 
     void KeyPress(int32_t keyCode, bool down) override {
         if (!EnsureStarted()) return;
+        uint32_t evdev_code = 0;
+        if ((keyCode & FLAG_RAW_MASK) == FLAG_RAW_LINUX) {
+            evdev_code = keyCode & ~FLAG_RAW_MASK;
+        } else if ((keyCode & FLAG_RAW_MASK) == FLAG_RAW_WINDOWS) {
+            evdev_code = KeyTranslator::WindowsToLinux(keyCode & ~FLAG_RAW_MASK);
+        } else {
+            evdev_code = KeyTranslator::WindowsToLinux(keyCode);
+        }
+        if (m_activeBackend == ActiveBackend::Uinput && m_uinputInjector) {
+            if (evdev_code != 0) {
+                m_uinputInjector->KeyPress(evdev_code, down);
+            }
+            return;
+        }
 #if INPUT_BRIDGE_HAS_LIBEI
         if (keyboard_routing == KeyboardRouting::EIS && eis_connected.load(std::memory_order_relaxed)) {
             EISDispatchPending();
             if (HasEISDevice()) {
-                uint32_t evdev_code = 0;
-
-                if ((keyCode & FLAG_RAW_MASK) == FLAG_RAW_LINUX) {
-                    evdev_code = keyCode & ~FLAG_RAW_MASK;
-                } else if ((keyCode & FLAG_RAW_MASK) == FLAG_RAW_WINDOWS) {
-                    evdev_code = KeyTranslator::WindowsToLinux(keyCode & ~FLAG_RAW_MASK);
-                } else {
-                    evdev_code = KeyTranslator::WindowsToLinux(keyCode);
-                }
-
                 if (evdev_code == 0) {
                     std::cerr << "[EIS WARN] Unrecognized key code: " << keyCode << ". Dropping input." << std::endl;
                     return;
@@ -2238,6 +2495,8 @@ class PlatformInputLinux : public IPlatformInput {
         }
 #endif
 
+        if (m_activeBackend != ActiveBackend::Portal) return;
+
         if (!allow_notify_keyboard) {
             Log("Keyboard routing requested but notify fallback is disabled.");
             return;
@@ -2248,22 +2507,6 @@ class PlatformInputLinux : public IPlatformInput {
         g_variant_builder_init(&options_builder, G_VARIANT_TYPE_VARDICT);
 
         uint32_t state = down ? 1 : 0;
-        uint32_t evdev_code = 0;
-
-        // Check if we received the raw Linux portal field marker
-        if ((keyCode & FLAG_RAW_MASK) == FLAG_RAW_LINUX) {
-            evdev_code = keyCode & ~FLAG_RAW_MASK;
-        }
-        // Or if this is raw Windows code that must be translated to Linux for this module
-        else if ((keyCode & FLAG_RAW_MASK) == FLAG_RAW_WINDOWS) {
-            evdev_code = KeyTranslator::WindowsToLinux(keyCode & ~FLAG_RAW_MASK);
-        }
-        // Default input case from Node.js library (in JS it is always a Windows Virtual-Key)
-        else {
-            evdev_code = KeyTranslator::WindowsToLinux(keyCode);
-        }
-
-        // If the translator did not recognize the key, safely drop the injection attempt
         if (evdev_code == 0) {
             std::cerr << "[DBUS WARN] Nierozpoznany kod klawisza: " << keyCode << ". Pomijam zastrzyk." << std::endl;
             return;
@@ -2314,6 +2557,10 @@ class PlatformInputLinux : public IPlatformInput {
 
     void ScrollMouse(int32_t delta) {
         if (!EnsureStarted()) return;
+        if (m_activeBackend == ActiveBackend::Uinput && m_uinputInjector) {
+            m_uinputInjector->Scroll(delta);
+            return;
+        }
 #if INPUT_BRIDGE_HAS_LIBEI
         if (eis_connected.load(std::memory_order_relaxed)) {
             EISDispatchPending();
@@ -2327,6 +2574,8 @@ class PlatformInputLinux : public IPlatformInput {
             }
         }
 #endif
+
+        if (m_activeBackend != ActiveBackend::Portal) return;
 
         if (!allow_notify_pointer) {
             Log("Pointer routing requested but notify fallback is disabled.");
@@ -2382,6 +2631,14 @@ class PlatformInputLinux : public IPlatformInput {
 
     void TypeCharacter(uint32_t charCode) override {
         if (!EnsureStarted()) return;
+        if (m_activeBackend == ActiveBackend::Uinput && m_uinputInjector) {
+            const uint32_t evdev = KeyTranslator::WindowsToLinux(static_cast<int32_t>(charCode));
+            if (evdev > 0) {
+                m_uinputInjector->KeyPress(evdev, true);
+                m_uinputInjector->KeyPress(evdev, false);
+            }
+            return;
+        }
 #if INPUT_BRIDGE_HAS_LIBEI
         if (keyboard_routing == KeyboardRouting::EIS && eis_connected.load(std::memory_order_relaxed)) {
             EISDispatchPending();
@@ -2397,6 +2654,8 @@ class PlatformInputLinux : public IPlatformInput {
             }
         }
 #endif
+
+        if (m_activeBackend != ActiveBackend::Portal) return;
 
         if (!allow_notify_keyboard) {
             Log("Unicode routing requested but notify fallback is disabled.");
@@ -2513,3 +2772,7 @@ class PlatformInputLinux : public IPlatformInput {
         m_batchMode = previousBatchMode;
     }
 };
+
+std::unique_ptr<IPlatformInput> CreateLinuxPlatformInput() {
+    return std::make_unique<PlatformInputLinux>();
+}
