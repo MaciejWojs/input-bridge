@@ -48,6 +48,11 @@ export interface ClipboardEvent {
      * Clipboard payload. For `text`, this is a string. For `files`, this is an array of file paths.
      */
     data: string | string[];
+
+    /**
+     * Unix epoch timestamp in milliseconds for this clipboard update.
+     */
+    timestamp: number;
 }
 
 export type InputEventType =

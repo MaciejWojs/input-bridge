@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <mutex>
@@ -348,6 +349,10 @@ class PlatformInputWin : public IPlatformInput {
     std::mutex m_clipboardMutex;
     std::condition_variable m_clipboardReady;
     HWND m_clipboardWindow = nullptr;
+    bool m_hasLastClipboardContent = false;
+    std::string m_lastClipboardType;
+    std::vector<std::string> m_lastClipboardFiles;
+    std::string m_lastClipboardText;
 
     InputEventCallback m_inputCallback;
     std::jthread m_inputDetectionThread;
@@ -363,6 +368,48 @@ class PlatformInputWin : public IPlatformInput {
     std::atomic<int> m_lastDetectedMouseY{ -1 };
 
     static PlatformInputWin* s_instance;
+
+    static int64_t CurrentTimestampMs() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()
+        ).count();
+    }
+
+    bool IsLastClipboardContentUnlocked(const std::string& type, const std::vector<std::string>& files, const std::string& text) const {
+        return m_hasLastClipboardContent
+            && m_lastClipboardType == type
+            && m_lastClipboardFiles == files
+            && m_lastClipboardText == text;
+    }
+
+    bool IsLastClipboardContent(const std::string& type, const std::vector<std::string>& files, const std::string& text) {
+        std::lock_guard<std::mutex> lock(m_clipboardMutex);
+        return IsLastClipboardContentUnlocked(type, files, text);
+    }
+
+    void StoreLastClipboardContentUnlocked(const std::string& type, const std::vector<std::string>& files, const std::string& text) {
+        m_hasLastClipboardContent = true;
+        m_lastClipboardType = type;
+        m_lastClipboardFiles = files;
+        m_lastClipboardText = text;
+    }
+
+    void EmitClipboardChange(const std::string& type, const std::vector<std::string>& files, const std::string& text) {
+        ClipboardChangeCallback callbackCopy;
+        const int64_t timestampMs = CurrentTimestampMs();
+        {
+            std::lock_guard<std::mutex> lock(m_clipboardMutex);
+            if (IsLastClipboardContentUnlocked(type, files, text)) {
+                return;
+            }
+            StoreLastClipboardContentUnlocked(type, files, text);
+            callbackCopy = m_clipboardCallback;
+        }
+
+        if (callbackCopy) {
+            callbackCopy(type, files, text, timestampMs);
+        }
+    }
 
     static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
         if (nCode == HC_ACTION && s_instance && s_instance->m_inputCallback) {
@@ -532,18 +579,10 @@ class PlatformInputWin : public IPlatformInput {
             CloseClipboard();
         }
 
-        ClipboardChangeCallback callbackCopy;
-        {
-            std::lock_guard<std::mutex> lock(m_clipboardMutex);
-            callbackCopy = m_clipboardCallback;
-        }
-
-        if (!callbackCopy) return;
-
         if (!files.empty()) {
-            callbackCopy("files", files, std::string());
+            EmitClipboardChange("files", files, std::string());
         } else if (!text.empty()) {
-            callbackCopy("text", {}, text);
+            EmitClipboardChange("text", {}, text);
         }
     }
 
@@ -659,11 +698,13 @@ class PlatformInputWin : public IPlatformInput {
     }
 
     void SetClipboardChangeCallback(ClipboardChangeCallback cb) override {
+        bool hasCallback = false;
         {
             std::lock_guard<std::mutex> lock(m_clipboardMutex);
             m_clipboardCallback = std::move(cb);
+            hasCallback = static_cast<bool>(m_clipboardCallback);
         }
-        if (m_clipboardCallback) {
+        if (hasCallback) {
             EnsureClipboardThread();
         }
     }
@@ -908,6 +949,9 @@ class PlatformInputWin : public IPlatformInput {
 
     // Clipboard: Set text
     bool SetClipboardText(const std::string& text) override {
+        if (IsLastClipboardContent("text", {}, text)) {
+            return true;
+        }
         if (!OpenClipboard(nullptr)) return false;
         if (!EmptyClipboard()) { CloseClipboard(); return false; }
         size_t size = (text.size() + 1) * sizeof(wchar_t);
@@ -918,6 +962,7 @@ class PlatformInputWin : public IPlatformInput {
         GlobalUnlock(hMem);
         if (!SetClipboardData(CF_UNICODETEXT, hMem)) { GlobalFree(hMem); CloseClipboard(); return false; }
         CloseClipboard();
+        EmitClipboardChange("text", {}, text);
         return true;
     }
 
@@ -938,6 +983,9 @@ class PlatformInputWin : public IPlatformInput {
 
     // Clipboard: Set files (CF_HDROP)
     bool SetClipboardFiles(const std::vector<std::string>& filePaths) override {
+        if (IsLastClipboardContent("files", filePaths, {})) {
+            return true;
+        }
         if (!OpenClipboard(nullptr)) return false;
         if (!EmptyClipboard()) { CloseClipboard(); return false; }
         // Convert UTF-8 paths to wide strings and double-null-terminated list
@@ -960,6 +1008,7 @@ class PlatformInputWin : public IPlatformInput {
         GlobalUnlock(hMem);
         if (!SetClipboardData(CF_HDROP, hMem)) { GlobalFree(hMem); CloseClipboard(); return false; }
         CloseClipboard();
+        EmitClipboardChange("files", filePaths, {});
         return true;
     }
 

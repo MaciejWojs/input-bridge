@@ -12,6 +12,7 @@
 
 #include <unistd.h>
 #include <dlfcn.h>
+#include <chrono>
 #include <mutex>
 
 #include <cctype>
@@ -238,11 +239,43 @@ class X11PlatformInput : public IPlatformInput {
 
     ClipboardChangeCallback m_clipboardCallback;
     std::mutex clipboard_callback_mutex;
+    bool m_hasLastClipboardContent = false;
+    std::string m_lastClipboardType;
+    std::vector<std::string> m_lastClipboardFiles;
+    std::string m_lastClipboardText;
     std::vector<MonitorInfo> m_monitors;
     std::mutex m_monitorMutex;
     int32_t m_currentMonitorIndex = 0;
 
+    static int64_t CurrentTimestampMs() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()
+        ).count();
+    }
+
+    bool IsLastClipboardContentUnlocked(const std::string& type, const std::vector<std::string>& files, const std::string& text) const {
+        return m_hasLastClipboardContent
+            && m_lastClipboardType == type
+            && m_lastClipboardFiles == files
+            && m_lastClipboardText == text;
+    }
+
+    bool IsLastClipboardContent(const std::string& type, const std::vector<std::string>& files, const std::string& text) {
+        std::lock_guard<std::mutex> lock(clipboard_callback_mutex);
+        return IsLastClipboardContentUnlocked(type, files, text);
+    }
+
+    void StoreLastClipboardContentUnlocked(const std::string& type, const std::vector<std::string>& files, const std::string& text) {
+        m_hasLastClipboardContent = true;
+        m_lastClipboardType = type;
+        m_lastClipboardFiles = files;
+        m_lastClipboardText = text;
+    }
+
     bool SetClipboardText(const std::string& text) override {
+        if (IsLastClipboardContent("text", {}, text)) {
+            return true;
+        }
         FILE* pipe = popen("xclip -selection clipboard -i", "w");
         if (!pipe) return false;
         fwrite(text.data(), 1, text.size(), pipe);
@@ -266,6 +299,9 @@ class X11PlatformInput : public IPlatformInput {
     }
 
     bool SetClipboardFiles(const std::vector<std::string>& files) override {
+        if (IsLastClipboardContent("files", files, {})) {
+            return true;
+        }
         FILE* pipe = popen("xclip -selection clipboard -t text/uri-list -i", "w");
         if (!pipe) return false;
         for (const auto& file : files) {
@@ -312,12 +348,17 @@ class X11PlatformInput : public IPlatformInput {
 
     void EmitClipboardChange(const std::string& type, const std::vector<std::string>& files, const std::string& text) {
         ClipboardChangeCallback callback;
+        const int64_t timestampMs = CurrentTimestampMs();
         {
             std::lock_guard<std::mutex> lock(clipboard_callback_mutex);
+            if (IsLastClipboardContentUnlocked(type, files, text)) {
+                return;
+            }
+            StoreLastClipboardContentUnlocked(type, files, text);
             callback = m_clipboardCallback;
         }
         if (callback) {
-            callback(type, files, text);
+            callback(type, files, text, timestampMs);
         }
     }
     private:
