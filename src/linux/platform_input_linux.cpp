@@ -274,8 +274,13 @@ class PlatformInputLinux : public IPlatformInput {
     std::mutex clipboard_mutex;
     std::map<std::string, std::string> m_clipboardData;
     guint clipboard_signal_id = 0;
+    guint clipboard_owner_changed_signal_id = 0;
     ClipboardChangeCallback m_clipboardCallback;
     std::mutex clipboard_callback_mutex;
+    bool m_hasLastClipboardContent = false;
+    std::string m_lastClipboardType;
+    std::vector<std::string> m_lastClipboardFiles;
+    std::string m_lastClipboardText;
     InputEventCallback m_inputCallback;
     std::mutex input_callback_mutex;
 
@@ -318,7 +323,35 @@ class PlatformInputLinux : public IPlatformInput {
                   << "." << std::endl;
     }
 
+    static int64_t CurrentTimestampMs() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()
+        ).count();
+    }
+
+    bool IsLastClipboardContentUnlocked(const std::string& type, const std::vector<std::string>& files, const std::string& text) const {
+        return m_hasLastClipboardContent
+            && m_lastClipboardType == type
+            && m_lastClipboardFiles == files
+            && m_lastClipboardText == text;
+    }
+
+    bool IsLastClipboardContent(const std::string& type, const std::vector<std::string>& files, const std::string& text) {
+        std::lock_guard<std::mutex> lock(clipboard_callback_mutex);
+        return IsLastClipboardContentUnlocked(type, files, text);
+    }
+
+    void StoreLastClipboardContentUnlocked(const std::string& type, const std::vector<std::string>& files, const std::string& text) {
+        m_hasLastClipboardContent = true;
+        m_lastClipboardType = type;
+        m_lastClipboardFiles = files;
+        m_lastClipboardText = text;
+    }
+
     bool SetClipboardText(const std::string& text) override {
+        if (IsLastClipboardContent("text", {}, text)) {
+            return true;
+        }
         if (m_activeBackend != ActiveBackend::Portal) {
             const bool ok = m_wlClipboard.SetText(text);
             if (ok) EmitClipboardChange("text", {}, text);
@@ -424,6 +457,9 @@ class PlatformInputLinux : public IPlatformInput {
     }
 
     bool SetClipboardFiles(const std::vector<std::string>& files) override {
+        if (IsLastClipboardContent("files", files, {})) {
+            return true;
+        }
         if (m_activeBackend != ActiveBackend::Portal) {
             const bool ok = m_wlClipboard.SetFiles(files);
             if (ok) EmitClipboardChange("files", files, {});
@@ -580,12 +616,17 @@ class PlatformInputLinux : public IPlatformInput {
 
     void EmitClipboardChange(const std::string& type, const std::vector<std::string>& files, const std::string& text) {
         ClipboardChangeCallback callback;
+        const int64_t timestampMs = CurrentTimestampMs();
         {
             std::lock_guard<std::mutex> lock(clipboard_callback_mutex);
+            if (IsLastClipboardContentUnlocked(type, files, text)) {
+                return;
+            }
+            StoreLastClipboardContentUnlocked(type, files, text);
             callback = m_clipboardCallback;
         }
         if (callback) {
-            callback(type, files, text);
+            callback(type, files, text, timestampMs);
         }
     }
 
@@ -1352,6 +1393,84 @@ class PlatformInputLinux : public IPlatformInput {
         );
     }
 
+    static std::vector<std::string> ExtractClipboardMimeTypes(GVariant* options) {
+        std::vector<std::string> mime_types;
+        if (!options) return mime_types;
+
+        GVariant* value = g_variant_lookup_value(options, "mime_types", G_VARIANT_TYPE_STRING_ARRAY);
+        if (!value) return mime_types;
+
+        GVariantIter iter;
+        const gchar* mime_type = nullptr;
+        g_variant_iter_init(&iter, value);
+        while (g_variant_iter_next(&iter, "&s", &mime_type)) {
+            mime_types.emplace_back(mime_type);
+        }
+        g_variant_unref(value);
+        return mime_types;
+    }
+
+    static bool HasMimeType(const std::vector<std::string>& mime_types, const char* mime_type) {
+        return std::find(mime_types.begin(), mime_types.end(), mime_type) != mime_types.end();
+    }
+
+    static bool ClipboardSessionIsOwner(GVariant* options) {
+        if (!options) return false;
+        gboolean session_is_owner = FALSE;
+        return g_variant_lookup(options, "session_is_owner", "b", &session_is_owner) && session_is_owner == TRUE;
+    }
+
+    static void OnClipboardSelectionOwnerChanged(GDBusConnection* connection, const gchar* sender_name,
+        const gchar* object_path, const gchar* interface_name,
+        const gchar* signal_name, GVariant* parameters, gpointer user_data) {
+        (void)connection;
+        (void)sender_name;
+        (void)object_path;
+        (void)interface_name;
+        (void)signal_name;
+
+        PlatformInputLinux* self = static_cast<PlatformInputLinux*>(user_data);
+        const std::string current_session_handle = self->GetSessionHandle();
+        const gchar* session_handle = nullptr;
+        GVariant* options = nullptr;
+
+        g_variant_get(parameters, "(&o@a{sv})", &session_handle, &options);
+
+        if (current_session_handle != session_handle || !self->ClipboardAvailable()) {
+            if (options) g_variant_unref(options);
+            return;
+        }
+
+        if (ClipboardSessionIsOwner(options)) {
+            g_variant_unref(options);
+            return;
+        }
+
+        const std::vector<std::string> mime_types = ExtractClipboardMimeTypes(options);
+        if (options) g_variant_unref(options);
+
+        const bool mime_types_known = !mime_types.empty();
+        const bool can_read_files = !mime_types_known || HasMimeType(mime_types, "text/uri-list");
+        const bool can_read_text = !mime_types_known
+            || HasMimeType(mime_types, "text/plain;charset=utf-8")
+            || HasMimeType(mime_types, "text/plain");
+
+        if (can_read_files) {
+            auto files = self->GetClipboardFiles();
+            if (files && !files->empty()) {
+                self->EmitClipboardChange("files", *files, {});
+                return;
+            }
+        }
+
+        if (can_read_text) {
+            auto text = self->GetClipboardText();
+            if (text && !text->empty()) {
+                self->EmitClipboardChange("text", {}, *text);
+            }
+        }
+    }
+
     // Counts down responses to the first stage of parallel portal initialization
     // (RequestClipboard + SelectDevices). When both have completed we proceed to
     // SelectSources. Used only when m_portalParallelInit is true.
@@ -1781,6 +1900,21 @@ class PlatformInputLinux : public IPlatformInput {
                 );
             }
 
+            if (self->clipboard_owner_changed_signal_id == 0) {
+                self->clipboard_owner_changed_signal_id = g_dbus_connection_signal_subscribe(
+                    self->connection,
+                    "org.freedesktop.portal.Desktop",
+                    "org.freedesktop.portal.Clipboard",
+                    "SelectionOwnerChanged",
+                    "/org/freedesktop/portal/desktop",
+                    nullptr,
+                    G_DBUS_SIGNAL_FLAGS_NONE,
+                    OnClipboardSelectionOwnerChanged,
+                    self,
+                    nullptr
+                );
+            }
+
             if (!has_request_handle) {
                 // If no request handle was returned, we won't receive a Response signal.
                 // We treat this as a success and move forward.
@@ -2086,6 +2220,9 @@ class PlatformInputLinux : public IPlatformInput {
         }
         if (clipboard_signal_id > 0 && connection) {
             g_dbus_connection_signal_unsubscribe(connection, clipboard_signal_id);
+        }
+        if (clipboard_owner_changed_signal_id > 0 && connection) {
+            g_dbus_connection_signal_unsubscribe(connection, clipboard_owner_changed_signal_id);
         }
         if (connection) {
             g_object_unref(connection);

@@ -371,6 +371,7 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
         std::string type;
         std::vector<std::string> files;
         std::string text;
+        int64_t timestampMs = 0;
     };
 
     struct InputEventData {
@@ -443,13 +444,14 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
         );
 
         if (m_queue.GetPlatform()) {
-            m_queue.GetPlatform()->SetClipboardChangeCallback([this](const std::string& type, const std::vector<std::string>& files, const std::string& text) {
+            m_queue.GetPlatform()->SetClipboardChangeCallback([this](const std::string& type, const std::vector<std::string>& files, const std::string& text, int64_t timestampMs) {
                 if (!m_clipboardTsfn) return;
 
-                auto* eventData = new ClipboardEventData{ type, files, text };
+                auto* eventData = new ClipboardEventData{ type, files, text, timestampMs };
                 napi_status status = m_clipboardTsfn.BlockingCall(eventData, [](Napi::Env env, Napi::Function jsCallback, ClipboardEventData* data) {
                     Napi::Object event = Napi::Object::New(env);
                     event.Set("type", data->type);
+                    event.Set("timestamp", Napi::Number::New(env, static_cast<double>(data->timestampMs)));
                     if (data->type == "files") {
                         Napi::Array arr = Napi::Array::New(env, data->files.size());
                         for (size_t i = 0; i < data->files.size(); ++i) {
