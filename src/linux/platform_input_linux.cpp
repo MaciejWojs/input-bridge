@@ -688,7 +688,6 @@ class PlatformInputLinux : public IPlatformInput {
             m_eis.seat = nullptr;
         }
         if (m_eis.context) {
-            ei_disconnect(m_eis.context);
             ei_unref(m_eis.context);
             m_eis.context = nullptr;
         }
