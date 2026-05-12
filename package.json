@@ -40,8 +40,6 @@
   "scripts": {
     "build": "bun x tsc",
     "prepublishOnly": "bun run build",
-    "version": " bun x conventional-changelog",
-    "postversion": "git add CHANGELOG.md && git commit --amend --no-edit",
     "rebuild": "node-gyp rebuild",
     "prebuildify": "bun run build && bun x prebuildify --napi --strip --tag-libc --electron-compat --node-gyp node-gyp",
     "test:load": "bun run build && node -e \"import('./dist/index.js').then(() => console.log('addon loaded'))\"",
