@@ -896,7 +896,8 @@ class PlatformInputLinux : public IPlatformInput {
             "/org/freedesktop/portal/documents",
             "org.freedesktop.portal.FileTransfer",
             "StartTransfer",
-            g_variant_new("(a{sv})", st_opts_done),
+            // Jedna wartość typu a{sv} w krotce — musi być @, inaczej varargs są źle interpretowane.
+            g_variant_new("(@a{sv})", st_opts_done),
             G_VARIANT_TYPE("(s)"),
             G_DBUS_CALL_FLAGS_NONE,
             -1,
@@ -979,13 +980,14 @@ class PlatformInputLinux : public IPlatformInput {
             GVariant* empty_done = g_variant_builder_end(&empty_opts);
 
             GError* add_err = nullptr;
+            // DBus: AddFiles(s key, ah fds, a{sv} options) — musi być @ah (tablica h), nie @h.
             GVariant* add_res = g_dbus_connection_call_with_unix_fd_list_sync(
                 connection,
                 "org.freedesktop.portal.Desktop",
                 "/org/freedesktop/portal/documents",
                 "org.freedesktop.portal.FileTransfer",
                 "AddFiles",
-                g_variant_new("(s@h@a{sv})", transfer_key.c_str(), handles_done, empty_done),
+                g_variant_new("(s@ah@a{sv})", transfer_key.c_str(), handles_done, empty_done),
                 nullptr,
                 G_DBUS_CALL_FLAGS_NONE,
                 -1,
