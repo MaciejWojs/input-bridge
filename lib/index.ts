@@ -38,6 +38,14 @@ export interface MonitorInfo extends MonitorMetadata {
     primary: boolean;
 }
 
+/** One file for `setClipboardFilesRemote()` (in-memory; no local path required). */
+export interface ClipboardRemoteFile {
+    /** Suggested file name; only the base name is used (path segments stripped). */
+    fileName: string;
+    /** File contents. */
+    data: Buffer | Uint8Array;
+}
+
 export interface ClipboardEvent {
     /**
      * The type of clipboard update.
@@ -218,16 +226,18 @@ export interface IInputBridge {
     getClipboardFiles(): string[] | null;
 
     /**
-     * Sets remote clipboard file descriptors and file contents in a format suitable
-     * for Remote Desktop / redirected clipboard file transfer.
-     * 
-     * @param filePaths - Array of absolute file paths to send remotely.
-     * @returns `true` if the remote clipboard object was created successfully.
-     * @throws {TypeError} If `filePaths` is not an array of strings.
-     * 
-     * @platform Windows: Supported. Linux: Not implemented.
+     * In-memory files for remote clipboard (e.g. bytes from a WebRTC DataChannel).
+     * The native layer may use temp files internally; callers pass only names and bytes.
+     * Path segments in `fileName` are ignored; only the base name is used.
+     *
+     * @param files - Array of `{ fileName, data }` entries (`data` as `Buffer` or `Uint8Array`).
+     * @returns `true` if the clipboard was updated successfully.
+     * @throws {TypeError} If entries are malformed or `data` is not binary.
+     *
+     * @platform Windows: OLE file formats and HDROP from temp files. Linux Wayland portal:
+     * XDG File Transfer (`application/vnd.portal.filetransfer`) plus `text/uri-list` where supported.
      */
-    setClipboardFilesRemote(filePaths: string[]): boolean;
+    setClipboardFilesRemote(files: ClipboardRemoteFile[]): boolean;
 
     /**
      * Gets the list of remote clipboard file names from the current clipboard.
@@ -763,8 +773,8 @@ export class InputBridge implements IInputBridge {
         return this.nativeBridge.getClipboardFiles();
     }
 
-    setClipboardFilesRemote(filePaths: string[]): boolean {
-        return this.nativeBridge.setClipboardFilesRemote(filePaths);
+    setClipboardFilesRemote(files: ClipboardRemoteFile[]): boolean {
+        return this.nativeBridge.setClipboardFilesRemote(files);
     }
 
     getClipboardFilesRemote(): string[] | null {

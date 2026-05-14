@@ -177,20 +177,51 @@ class InputBridge : public Napi::ObjectWrap<InputBridge> {
         return arr;
     }
 
-    // Clipboard: setClipboardFilesRemote(paths: string[]): boolean
+    // Clipboard: setClipboardFilesRemote(files: { fileName: string, data: Buffer | Uint8Array }[]): boolean
     Napi::Value SetClipboardFilesRemote(const Napi::CallbackInfo& info) {
         if (info.Length() < 1 || !info[0].IsArray()) {
-            Napi::TypeError::New(info.Env(), "Expected array of file paths").ThrowAsJavaScriptException();
+            Napi::TypeError::New(info.Env(), "Expected array of { fileName: string, data: Buffer | Uint8Array }").ThrowAsJavaScriptException();
             return info.Env().Undefined();
         }
         Napi::Array arr = info[0].As<Napi::Array>();
-        std::vector<std::string> paths;
+        std::vector<ClipboardRemoteFileEntry> entries;
+        entries.reserve(arr.Length());
         for (uint32_t i = 0; i < arr.Length(); ++i) {
             Napi::Value v = arr[i];
-            if (!v.IsString()) continue;
-            paths.push_back(v.As<Napi::String>().Utf8Value());
+            if (!v.IsObject()) {
+                continue;
+            }
+            Napi::Object o = v.As<Napi::Object>();
+            if (!o.Has("fileName") || !o.Get("fileName").IsString()) {
+                continue;
+            }
+            if (!o.Has("data")) {
+                continue;
+            }
+            std::string fileName = o.Get("fileName").As<Napi::String>().Utf8Value();
+            Napi::Value dataVal = o.Get("data");
+            std::vector<uint8_t> bytes;
+            if (dataVal.IsBuffer()) {
+                Napi::Buffer<uint8_t> buf = dataVal.As<Napi::Buffer<uint8_t>>();
+                bytes.assign(buf.Data(), buf.Data() + buf.Length());
+            } else if (dataVal.IsTypedArray()) {
+                Napi::TypedArray ta = dataVal.As<Napi::TypedArray>();
+                if (ta.TypedArrayType() != napi_uint8_array) {
+                    Napi::TypeError::New(info.Env(), "Each entry.data must be Buffer or Uint8Array").ThrowAsJavaScriptException();
+                    return info.Env().Undefined();
+                }
+                Napi::Uint8Array ua = ta.As<Napi::Uint8Array>();
+                bytes.assign(ua.Data(), ua.Data() + ua.ByteLength());
+            } else {
+                Napi::TypeError::New(info.Env(), "Each entry.data must be Buffer or Uint8Array").ThrowAsJavaScriptException();
+                return info.Env().Undefined();
+            }
+            entries.push_back(ClipboardRemoteFileEntry{std::move(fileName), std::move(bytes)});
         }
-        bool ok = m_queue.GetPlatform()->SetClipboardFilesRemote(paths);
+        if (entries.empty()) {
+            return Napi::Boolean::New(info.Env(), false);
+        }
+        bool ok = m_queue.GetPlatform()->SetClipboardFilesRemote(entries);
         return Napi::Boolean::New(info.Env(), ok);
     }
 

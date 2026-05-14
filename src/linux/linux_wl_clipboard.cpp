@@ -3,6 +3,8 @@
 #include <cstdio>
 #include <sstream>
 
+#include <glib.h>
+
 namespace {
 bool RunWriteCommand(const char* command, const std::string& payload) {
     FILE* pipe = popen(command, "w");
@@ -47,7 +49,20 @@ std::optional<std::string> LinuxWlClipboard::GetText() const {
 bool LinuxWlClipboard::SetFiles(const std::vector<std::string>& files) const {
     std::string payload;
     for (const auto& file : files) {
-        payload += "file://" + file + "\r\n";
+        GError* err = nullptr;
+        gchar* uri = g_filename_to_uri(file.c_str(), nullptr, &err);
+        if (!uri) {
+            if (err) {
+                g_error_free(err);
+            }
+            continue;
+        }
+        payload += uri;
+        payload += "\r\n";
+        g_free(uri);
+    }
+    if (payload.empty()) {
+        return false;
     }
     return RunWriteCommand("wl-copy --type text/uri-list", payload);
 }
@@ -63,9 +78,19 @@ std::optional<std::vector<std::string>> LinuxWlClipboard::GetFiles() const {
     std::string line;
     while (std::getline(stream, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
-        const std::string prefix = "file://";
-        if (line.compare(0, prefix.size(), prefix) == 0) {
-            files.push_back(line.substr(prefix.size()));
+        GError* err = nullptr;
+        gchar* fn = g_filename_from_uri(line.c_str(), nullptr, &err);
+        if (fn) {
+            files.emplace_back(fn);
+            g_free(fn);
+        } else {
+            if (err) {
+                g_error_free(err);
+            }
+            const std::string prefix = "file://";
+            if (line.compare(0, prefix.size(), prefix) == 0) {
+                files.push_back(line.substr(prefix.size()));
+            }
         }
     }
     if (files.empty()) {

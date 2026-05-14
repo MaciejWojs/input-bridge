@@ -23,6 +23,10 @@
 #include <dlfcn.h>
 #include <poll.h>
 #include <regex>
+#include <fcntl.h>
+#include <cctype>
+
+#include <glib.h>
 
 #if defined(INPUT_BRIDGE_DISABLE_LIBEI)
 #pragma message(">>> COMPILING WITH DISABLED LIBEI SUPPORT<<<")
@@ -45,6 +49,91 @@
 #endif
 
 #include <algorithm>
+
+namespace {
+
+std::string SanitizeClipboardBasename(const std::string& file_name) {
+    std::string base = file_name;
+    const size_t slash = base.find_last_of("/\\");
+    if (slash != std::string::npos) {
+        base = base.substr(slash + 1);
+    }
+    std::string out;
+    out.reserve(base.size());
+    for (unsigned char c : base) {
+        if (std::isalnum(c) != 0 || c == '.' || c == '_' || c == '-') {
+            out.push_back(static_cast<char>(c));
+        } else if (c == ' ') {
+            out.push_back('_');
+        }
+    }
+    if (out.empty() || out == "." || out == "..") {
+        out = "file.bin";
+    }
+    return out;
+}
+
+bool WriteClipboardTempFile(const std::vector<uint8_t>& bytes, const std::string& basename_hint, std::string& out_abs_path) {
+    const std::string safe = SanitizeClipboardBasename(basename_hint);
+    GError* err = nullptr;
+    gchar* tmpl = g_strdup_printf("input-bridge-clipboard-XXXXXX-%s", safe.c_str());
+    gchar* path_used = nullptr;
+    const int fd = g_file_open_tmp(tmpl, &path_used, &err);
+    g_free(tmpl);
+    if (fd < 0) {
+        if (err) {
+            g_error_free(err);
+        }
+        return false;
+    }
+    if (!bytes.empty()) {
+        const ssize_t n = static_cast<ssize_t>(write(fd, bytes.data(), bytes.size()));
+        if (n != static_cast<ssize_t>(bytes.size())) {
+            close(fd);
+            unlink(path_used);
+            g_free(path_used);
+            return false;
+        }
+    }
+    close(fd);
+    out_abs_path.assign(path_used);
+    g_free(path_used);
+    return true;
+}
+
+std::string BuildUriListFromAbsPaths(const std::vector<std::string>& abs_paths) {
+    std::string payload;
+    for (const auto& file : abs_paths) {
+        GError* err = nullptr;
+        gchar* uri = g_filename_to_uri(file.c_str(), nullptr, &err);
+        if (!uri) {
+            if (err) {
+                g_error_free(err);
+            }
+            continue;
+        }
+        payload += uri;
+        payload += "\r\n";
+        g_free(uri);
+    }
+    return payload;
+}
+
+std::string TrimWhitespace(std::string s) {
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ' || s.back() == '\t')) {
+        s.pop_back();
+    }
+    size_t i = 0;
+    while (i < s.size() && (s[i] == '\n' || s[i] == '\r' || s[i] == ' ' || s[i] == '\t')) {
+        ++i;
+    }
+    if (i > 0) {
+        s.erase(0, i);
+    }
+    return s;
+}
+
+} // namespace
 
 class PlatformInputLinux : public IPlatformInput {
 
@@ -275,6 +364,9 @@ class PlatformInputLinux : public IPlatformInput {
     std::map<std::string, std::string> m_clipboardData;
     guint clipboard_signal_id = 0;
     guint clipboard_owner_changed_signal_id = 0;
+    guint m_file_transfer_signal_id = 0;
+    std::map<std::string, std::vector<std::string>> m_fileTransferTempByKey;
+    std::vector<std::string> m_pendingWlRemoteTempPaths;
     ClipboardChangeCallback m_clipboardCallback;
     std::mutex clipboard_callback_mutex;
     bool m_hasLastClipboardContent = false;
@@ -323,6 +415,167 @@ class PlatformInputLinux : public IPlatformInput {
                   << "." << std::endl;
     }
 
+    void ClearPendingWlRemoteTempPathsUnlocked() {
+        for (const auto& p : m_pendingWlRemoteTempPaths) {
+            unlink(p.c_str());
+        }
+        m_pendingWlRemoteTempPaths.clear();
+    }
+
+    void StopAllPortalFileTransfersUnlocked() {
+        if (!connection) {
+            m_fileTransferTempByKey.clear();
+            return;
+        }
+        while (!m_fileTransferTempByKey.empty()) {
+            auto it = m_fileTransferTempByKey.begin();
+            const std::string k = it->first;
+            std::vector<std::string> paths = std::move(it->second);
+            m_fileTransferTempByKey.erase(it);
+            GError* e = nullptr;
+            g_dbus_connection_call_sync(
+                connection,
+                "org.freedesktop.portal.Desktop",
+                "/org/freedesktop/portal/documents",
+                "org.freedesktop.portal.FileTransfer",
+                "StopTransfer",
+                g_variant_new("(s)", k.c_str()),
+                nullptr,
+                G_DBUS_CALL_FLAGS_NONE,
+                -1,
+                nullptr,
+                &e
+            );
+            if (e) {
+                g_error_free(e);
+            }
+            for (const auto& p : paths) {
+                unlink(p.c_str());
+            }
+        }
+    }
+
+    std::optional<std::string> PortalReadClipboardMime(const std::string& mime_type) {
+        const std::string session_handle = GetSessionHandle();
+        GError* error = nullptr;
+        GUnixFDList* out_fd_list = nullptr;
+        GVariant* result = g_dbus_connection_call_with_unix_fd_list_sync(
+            connection,
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.Clipboard",
+            "SelectionRead",
+            g_variant_new("(os)", session_handle.c_str(), mime_type.c_str()),
+            G_VARIANT_TYPE("(h)"),
+            G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            nullptr,
+            &out_fd_list,
+            nullptr,
+            &error
+        );
+
+        if (error) {
+            g_error_free(error);
+            return std::nullopt;
+        }
+
+        gint handle_index = -1;
+        g_variant_get(result, "(h)", &handle_index);
+        int fd = g_unix_fd_list_get(out_fd_list, handle_index, nullptr);
+
+        std::string data;
+        if (fd >= 0) {
+            char buffer[1024];
+            ssize_t bytes_read;
+            while ((bytes_read = read(fd, buffer, sizeof(buffer))) > 0) {
+                data.append(buffer, bytes_read);
+            }
+            close(fd);
+        }
+
+        if (out_fd_list) {
+            g_object_unref(out_fd_list);
+        }
+        if (result) {
+            g_variant_unref(result);
+        }
+
+        if (data.empty()) {
+            return std::nullopt;
+        }
+        return data;
+    }
+
+    std::optional<std::vector<std::string>> PortalRetrieveFilesForKey(const std::string& key) {
+        GVariantBuilder opts;
+        g_variant_builder_init(&opts, G_VARIANT_TYPE_VARDICT);
+        GVariant* opts_done = g_variant_builder_end(&opts);
+        GError* error = nullptr;
+        GVariant* res = g_dbus_connection_call_sync(
+            connection,
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/documents",
+            "org.freedesktop.portal.FileTransfer",
+            "RetrieveFiles",
+            g_variant_new("(s@a{sv})", key.c_str(), opts_done),
+            G_VARIANT_TYPE("(as)"),
+            G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            nullptr,
+            &error
+        );
+        if (error) {
+            g_error_free(error);
+            return std::nullopt;
+        }
+        if (!res) {
+            return std::nullopt;
+        }
+        GVariant* arr = g_variant_get_child_value(res, 0);
+        if (!arr) {
+            g_variant_unref(res);
+            return std::nullopt;
+        }
+        gsize len = 0;
+        gchar** paths = g_variant_dup_strv(arr, &len);
+        g_variant_unref(arr);
+        g_variant_unref(res);
+        std::optional<std::vector<std::string>> out;
+        if (paths) {
+            out.emplace();
+            for (gsize i = 0; i < len; ++i) {
+                out->emplace_back(paths[i]);
+            }
+            g_strfreev(paths);
+        }
+        return out;
+    }
+
+    static void OnFileTransferClosed(GDBusConnection*, const gchar*, const gchar*, const gchar*, const gchar*,
+        GVariant* parameters, gpointer user_data) {
+        PlatformInputLinux* self = static_cast<PlatformInputLinux*>(user_data);
+        const gchar* key = nullptr;
+        g_variant_get(parameters, "(&s)", &key);
+        if (!key || !key[0]) {
+            return;
+        }
+        const std::string k(key);
+        std::vector<std::string> paths;
+        {
+            std::lock_guard<std::mutex> lock(self->clipboard_mutex);
+            auto it = self->m_fileTransferTempByKey.find(k);
+            if (it == self->m_fileTransferTempByKey.end()) {
+                return;
+            }
+            paths = std::move(it->second);
+            self->m_fileTransferTempByKey.erase(it);
+        }
+        for (const auto& p : paths) {
+            unlink(p.c_str());
+        }
+    }
+
     static int64_t CurrentTimestampMs() {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()
@@ -353,6 +606,10 @@ class PlatformInputLinux : public IPlatformInput {
             return true;
         }
         if (m_activeBackend != ActiveBackend::Portal) {
+            {
+                std::lock_guard<std::mutex> lock(clipboard_mutex);
+                ClearPendingWlRemoteTempPathsUnlocked();
+            }
             const bool ok = m_wlClipboard.SetText(text);
             if (ok) EmitClipboardChange("text", {}, text);
             return ok;
@@ -365,6 +622,8 @@ class PlatformInputLinux : public IPlatformInput {
         const std::string session_handle = GetSessionHandle();
         {
             std::lock_guard<std::mutex> lock(clipboard_mutex);
+            StopAllPortalFileTransfersUnlocked();
+            ClearPendingWlRemoteTempPathsUnlocked();
             m_clipboardData["text/plain;charset=utf-8"] = text;
         }
 
@@ -461,6 +720,10 @@ class PlatformInputLinux : public IPlatformInput {
             return true;
         }
         if (m_activeBackend != ActiveBackend::Portal) {
+            {
+                std::lock_guard<std::mutex> lock(clipboard_mutex);
+                ClearPendingWlRemoteTempPathsUnlocked();
+            }
             const bool ok = m_wlClipboard.SetFiles(files);
             if (ok) EmitClipboardChange("files", files, {});
             return ok;
@@ -471,13 +734,12 @@ class PlatformInputLinux : public IPlatformInput {
         }
 
         const std::string session_handle = GetSessionHandle();
-        std::string payload;
-        for (const auto& file : files) {
-            payload += "file://" + file + "\r\n";
-        }
+        const std::string payload = BuildUriListFromAbsPaths(files);
 
         {
             std::lock_guard<std::mutex> lock(clipboard_mutex);
+            StopAllPortalFileTransfersUnlocked();
+            ClearPendingWlRemoteTempPathsUnlocked();
             m_clipboardData["text/uri-list"] = payload;
         }
 
@@ -524,74 +786,282 @@ class PlatformInputLinux : public IPlatformInput {
             return std::nullopt;
         }
 
-        const std::string session_handle = GetSessionHandle();
-        GError* error = nullptr;
-        GUnixFDList* out_fd_list = nullptr;
-        GVariant* result = g_dbus_connection_call_with_unix_fd_list_sync(
-            connection,
-            "org.freedesktop.portal.Desktop",
-            "/org/freedesktop/portal/desktop",
-            "org.freedesktop.portal.Clipboard",
-            "SelectionRead",
-            g_variant_new("(os)", session_handle.c_str(), "text/uri-list"),
-            G_VARIANT_TYPE("(h)"),
-            G_DBUS_CALL_FLAGS_NONE,
-            -1,
-            nullptr,
-            &out_fd_list,
-            nullptr,
-            &error
-        );
+        if (auto raw_key = PortalReadClipboardMime("application/vnd.portal.filetransfer")) {
+            const std::string key = TrimWhitespace(*raw_key);
+            if (!key.empty()) {
+                if (auto retrieved = PortalRetrieveFilesForKey(key)) {
+                    if (!retrieved->empty()) {
+                        return retrieved;
+                    }
+                }
+            }
+        }
 
-        if (error) {
-            g_error_free(error);
+        auto uri_data = PortalReadClipboardMime("text/uri-list");
+        if (!uri_data || uri_data->empty()) {
             return std::nullopt;
         }
 
-        gint handle_index;
-        g_variant_get(result, "(h)", &handle_index);
-        int fd = g_unix_fd_list_get(out_fd_list, handle_index, nullptr);
-
-        std::string data;
-        if (fd >= 0) {
-            char buffer[1024];
-            ssize_t bytes_read;
-            while ((bytes_read = read(fd, buffer, sizeof(buffer))) > 0) {
-                data.append(buffer, bytes_read);
-            }
-            close(fd);
-        }
-
-        if (out_fd_list) g_object_unref(out_fd_list);
-        if (result) g_variant_unref(result);
-
-        if (data.empty()) return std::nullopt;
-
         std::vector<std::string> files;
-        std::istringstream stream(data);
+        std::istringstream stream(*uri_data);
         std::string line;
         while (std::getline(stream, line)) {
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            const std::string prefix = "file://";
-            if (line.compare(0, prefix.size(), prefix) == 0) {
-                files.push_back(line.substr(prefix.size()));
+            if (!line.empty() && line.back() == '\r') {
+                line.pop_back();
+            }
+            GError* ferr = nullptr;
+            gchar* fn = g_filename_from_uri(line.c_str(), nullptr, &ferr);
+            if (fn) {
+                files.emplace_back(fn);
+                g_free(fn);
+            } else {
+                if (ferr) {
+                    g_error_free(ferr);
+                }
+                const std::string prefix = "file://";
+                if (line.compare(0, prefix.size(), prefix) == 0) {
+                    files.push_back(line.substr(prefix.size()));
+                }
             }
         }
 
         return files.empty() ? std::nullopt : std::make_optional(files);
     }
 
-    bool SetClipboardFilesRemote(const std::vector<std::string>& files) override {
-        if (m_activeBackend != ActiveBackend::Portal) {
+    bool SetClipboardFilesRemote(const std::vector<ClipboardRemoteFileEntry>& files) override {
+        if (files.empty()) {
             return false;
         }
-        return SetClipboardFiles(files);
+
+        if (m_activeBackend != ActiveBackend::Portal) {
+            {
+                std::lock_guard<std::mutex> lock(clipboard_mutex);
+                ClearPendingWlRemoteTempPathsUnlocked();
+            }
+            std::vector<std::string> paths;
+            paths.reserve(files.size());
+            for (const auto& e : files) {
+                std::string p;
+                if (!WriteClipboardTempFile(e.bytes, e.file_name, p)) {
+                    for (const auto& rp : paths) {
+                        unlink(rp.c_str());
+                    }
+                    return false;
+                }
+                paths.push_back(std::move(p));
+            }
+            const bool ok = m_wlClipboard.SetFiles(paths);
+            if (!ok) {
+                for (const auto& rp : paths) {
+                    unlink(rp.c_str());
+                }
+                return false;
+            }
+            {
+                std::lock_guard<std::mutex> lock(clipboard_mutex);
+                m_pendingWlRemoteTempPaths = paths;
+            }
+            EmitClipboardChange("files", paths, {});
+            return true;
+        }
+
+        if (!ClipboardAvailable()) {
+            LogClipboardUnavailable("SetClipboardFilesRemote");
+            return false;
+        }
+
+        std::vector<std::string> abs_paths;
+        abs_paths.reserve(files.size());
+        for (const auto& e : files) {
+            std::string p;
+            if (!WriteClipboardTempFile(e.bytes, e.file_name, p)) {
+                for (const auto& rp : abs_paths) {
+                    unlink(rp.c_str());
+                }
+                return false;
+            }
+            abs_paths.push_back(std::move(p));
+        }
+
+        GVariantBuilder st_opts;
+        g_variant_builder_init(&st_opts, G_VARIANT_TYPE_VARDICT);
+        g_variant_builder_add(&st_opts, "{sv}", "writable", g_variant_new_boolean(FALSE));
+        g_variant_builder_add(&st_opts, "{sv}", "autostop", g_variant_new_boolean(TRUE));
+        GVariant* st_opts_done = g_variant_builder_end(&st_opts);
+
+        GError* st_err = nullptr;
+        GVariant* st_res = g_dbus_connection_call_sync(
+            connection,
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/documents",
+            "org.freedesktop.portal.FileTransfer",
+            "StartTransfer",
+            g_variant_new("(a{sv})", st_opts_done),
+            G_VARIANT_TYPE("(s)"),
+            G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            nullptr,
+            &st_err
+        );
+
+        if (!st_res) {
+            std::cerr << "FileTransfer.StartTransfer failed: " << (st_err ? st_err->message : "?") << std::endl;
+            if (st_err) {
+                g_error_free(st_err);
+            }
+            for (const auto& rp : abs_paths) {
+                unlink(rp.c_str());
+            }
+            return false;
+        }
+
+        const gchar* key_c = nullptr;
+        g_variant_get(st_res, "(&s)", &key_c);
+        std::string transfer_key = key_c ? std::string(key_c) : std::string();
+        g_variant_unref(st_res);
+
+        if (transfer_key.empty()) {
+            for (const auto& rp : abs_paths) {
+                unlink(rp.c_str());
+            }
+            return false;
+        }
+
+        constexpr size_t kMaxFdsPerAdd = 12;
+        auto fail_cleanup = [&]() {
+            GError* se = nullptr;
+            g_dbus_connection_call_sync(
+                connection,
+                "org.freedesktop.portal.Desktop",
+                "/org/freedesktop/portal/documents",
+                "org.freedesktop.portal.FileTransfer",
+                "StopTransfer",
+                g_variant_new("(s)", transfer_key.c_str()),
+                nullptr,
+                G_DBUS_CALL_FLAGS_NONE,
+                -1,
+                nullptr,
+                &se
+            );
+            if (se) {
+                g_error_free(se);
+            }
+            for (const auto& rp : abs_paths) {
+                unlink(rp.c_str());
+            }
+        };
+
+        for (size_t off = 0; off < abs_paths.size(); off += kMaxFdsPerAdd) {
+            GUnixFDList* fd_list = g_unix_fd_list_new();
+            GVariantBuilder handle_builder;
+            g_variant_builder_init(&handle_builder, G_VARIANT_TYPE("ah"));
+            const size_t batch_end = std::min(off + kMaxFdsPerAdd, abs_paths.size());
+            for (size_t i = off; i < batch_end; ++i) {
+                const int raw_fd = open(abs_paths[i].c_str(), O_RDONLY | O_CLOEXEC);
+                if (raw_fd < 0) {
+                    g_object_unref(fd_list);
+                    fail_cleanup();
+                    return false;
+                }
+                const gint idx = g_unix_fd_list_append(fd_list, raw_fd, nullptr);
+                if (idx < 0) {
+                    g_object_unref(fd_list);
+                    fail_cleanup();
+                    return false;
+                }
+                close(raw_fd);
+                g_variant_builder_add(&handle_builder, "h", idx);
+            }
+
+            GVariantBuilder empty_opts;
+            g_variant_builder_init(&empty_opts, G_VARIANT_TYPE_VARDICT);
+            GVariant* handles_done = g_variant_builder_end(&handle_builder);
+            GVariant* empty_done = g_variant_builder_end(&empty_opts);
+
+            GError* add_err = nullptr;
+            GVariant* add_res = g_dbus_connection_call_with_unix_fd_list_sync(
+                connection,
+                "org.freedesktop.portal.Desktop",
+                "/org/freedesktop/portal/documents",
+                "org.freedesktop.portal.FileTransfer",
+                "AddFiles",
+                g_variant_new("(s@h@a{sv})", transfer_key.c_str(), handles_done, empty_done),
+                nullptr,
+                G_DBUS_CALL_FLAGS_NONE,
+                -1,
+                fd_list,
+                nullptr,
+                nullptr,
+                &add_err
+            );
+            g_object_unref(fd_list);
+            if (add_res) {
+                g_variant_unref(add_res);
+            }
+            if (add_err) {
+                std::cerr << "FileTransfer.AddFiles failed: " << add_err->message << std::endl;
+                g_error_free(add_err);
+                fail_cleanup();
+                return false;
+            }
+        }
+
+        const std::string uri_payload = BuildUriListFromAbsPaths(abs_paths);
+
+        {
+            std::lock_guard<std::mutex> lock(clipboard_mutex);
+            StopAllPortalFileTransfersUnlocked();
+            ClearPendingWlRemoteTempPathsUnlocked();
+            m_clipboardData["application/vnd.portal.filetransfer"] = transfer_key;
+            m_clipboardData["text/uri-list"] = uri_payload;
+            m_fileTransferTempByKey[transfer_key] = abs_paths;
+        }
+
+        const std::string session_handle = GetSessionHandle();
+        GVariantBuilder options;
+        g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);
+        GVariantBuilder mime_builder;
+        g_variant_builder_init(&mime_builder, G_VARIANT_TYPE_STRING_ARRAY);
+        g_variant_builder_add(&mime_builder, "s", "application/vnd.portal.filetransfer");
+        g_variant_builder_add(&mime_builder, "s", "text/uri-list");
+        g_variant_builder_add(&options, "{sv}", "mime_types", g_variant_builder_end(&mime_builder));
+
+        GError* sel_err = nullptr;
+        GVariant* sel_res = g_dbus_connection_call_sync(
+            connection,
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.Clipboard",
+            "SetSelection",
+            g_variant_new("(o@a{sv})", session_handle.c_str(), g_variant_builder_end(&options)),
+            nullptr,
+            G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            nullptr,
+            &sel_err
+        );
+
+        if (sel_err) {
+            std::cerr << "Failed to SetSelection (Clipboard Remote Files): " << sel_err->message << std::endl;
+            g_error_free(sel_err);
+            fail_cleanup();
+            {
+                std::lock_guard<std::mutex> lock(clipboard_mutex);
+                m_clipboardData.erase("application/vnd.portal.filetransfer");
+                m_clipboardData.erase("text/uri-list");
+                m_fileTransferTempByKey.erase(transfer_key);
+            }
+            return false;
+        }
+        if (sel_res) {
+            g_variant_unref(sel_res);
+        }
+
+        EmitClipboardChange("files", abs_paths, {});
+        return true;
     }
 
     std::optional<std::vector<std::string>> GetClipboardFilesRemote() override {
-        if (m_activeBackend != ActiveBackend::Portal) {
-            return std::nullopt;
-        }
         return GetClipboardFiles();
     }
 
@@ -1449,7 +1919,9 @@ class PlatformInputLinux : public IPlatformInput {
         if (options) g_variant_unref(options);
 
         const bool mime_types_known = !mime_types.empty();
-        const bool can_read_files = !mime_types_known || HasMimeType(mime_types, "text/uri-list");
+        const bool can_read_files = !mime_types_known
+            || HasMimeType(mime_types, "text/uri-list")
+            || HasMimeType(mime_types, "application/vnd.portal.filetransfer");
         const bool can_read_text = !mime_types_known
             || HasMimeType(mime_types, "text/plain;charset=utf-8")
             || HasMimeType(mime_types, "text/plain");
@@ -2112,6 +2584,21 @@ class PlatformInputLinux : public IPlatformInput {
                 nullptr
             );
 
+            if (this->m_file_transfer_signal_id == 0) {
+                this->m_file_transfer_signal_id = g_dbus_connection_signal_subscribe(
+                    this->connection,
+                    "org.freedesktop.portal.Desktop",
+                    "org.freedesktop.portal.FileTransfer",
+                    "TransferClosed",
+                    "/org/freedesktop/portal/documents",
+                    nullptr,
+                    G_DBUS_SIGNAL_FLAGS_NONE,
+                    OnFileTransferClosed,
+                    this,
+                    nullptr
+                );
+            }
+
             this->main_loop = g_main_loop_new(this->dbus_context, FALSE);
             dbus_ready.set_value(true);
             g_main_loop_run(this->main_loop);
@@ -2204,6 +2691,11 @@ class PlatformInputLinux : public IPlatformInput {
             m_uinputInjector->Shutdown();
             m_uinputInjector.reset();
         }
+        {
+            std::lock_guard<std::mutex> lock(clipboard_mutex);
+            StopAllPortalFileTransfersUnlocked();
+            ClearPendingWlRemoteTempPathsUnlocked();
+        }
         if (main_loop) {
             g_main_loop_quit(main_loop);
             if (loop_thread.joinable()) {
@@ -2222,6 +2714,9 @@ class PlatformInputLinux : public IPlatformInput {
         }
         if (clipboard_owner_changed_signal_id > 0 && connection) {
             g_dbus_connection_signal_unsubscribe(connection, clipboard_owner_changed_signal_id);
+        }
+        if (m_file_transfer_signal_id > 0 && connection) {
+            g_dbus_connection_signal_unsubscribe(connection, m_file_transfer_signal_id);
         }
         if (connection) {
             g_object_unref(connection);

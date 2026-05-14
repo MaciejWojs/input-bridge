@@ -32,6 +32,71 @@ static std::wstring GetFileName(const std::wstring& fullPath) {
     return fullPath.substr(pos + 1);
 }
 
+static std::string SanitizeRemoteBasenameUtf8(const std::string& file_name) {
+    std::string base = file_name;
+    const size_t slash = base.find_last_of("/\\");
+    if (slash != std::string::npos) {
+        base = base.substr(slash + 1);
+    }
+    std::string out;
+    out.reserve(base.size());
+    for (unsigned char c : base) {
+        if (c < 32) {
+            continue;
+        }
+        switch (c) {
+        case '<':
+        case '>':
+        case ':':
+        case '"':
+        case '/':
+        case '\\':
+        case '|':
+        case '?':
+        case '*':
+            continue;
+        default:
+            break;
+        }
+        out.push_back(static_cast<char>(c));
+    }
+    if (out.empty() || out == "." || out == "..") {
+        out = "file.bin";
+    }
+    if (out.size() > 200) {
+        out.resize(200);
+    }
+    return out;
+}
+
+static std::wstring WriteRemoteBytesToTempFile(const std::vector<uint8_t>& bytes) {
+    wchar_t tempDir[MAX_PATH];
+    if (GetTempPathW(MAX_PATH, tempDir) == 0) {
+        return {};
+    }
+    wchar_t tempPath[MAX_PATH];
+    if (GetTempFileNameW(tempDir, L"ibc", 0, tempPath) == 0) {
+        return {};
+    }
+    HANDLE h = CreateFileW(tempPath, GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        DeleteFileW(tempPath);
+        return {};
+    }
+    bool ok = true;
+    if (!bytes.empty()) {
+        DWORD written = 0;
+        ok = WriteFile(h, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr) != FALSE
+            && written == static_cast<DWORD>(bytes.size());
+    }
+    CloseHandle(h);
+    if (!ok) {
+        DeleteFileW(tempPath);
+        return {};
+    }
+    return std::wstring(tempPath);
+}
+
 static std::string WideToUtf8(const std::wstring& wide) {
     if (wide.empty()) return {};
     int utf8Len = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, nullptr, 0, nullptr, nullptr);
@@ -1012,20 +1077,36 @@ class PlatformInputWin : public IPlatformInput {
         return true;
     }
 
-    // Clipboard: Set remote files (CFSTR_FILEDESCRIPTORW / CFSTR_FILECONTENTS)
-    bool SetClipboardFilesRemote(const std::vector<std::string>& filePaths) override {
+    // Clipboard: Set remote files (CFSTR_FILEDESCRIPTORW / CFSTR_FILECONTENTS) from in-memory bytes
+    bool SetClipboardFilesRemote(const std::vector<ClipboardRemoteFileEntry>& files) override {
+        if (files.empty()) {
+            return false;
+        }
         std::vector<std::wstring> fullPaths;
         std::vector<std::wstring> fileNames;
         std::vector<std::vector<uint8_t>> fileContents;
+        fullPaths.reserve(files.size());
+        fileNames.reserve(files.size());
+        fileContents.reserve(files.size());
 
-        for (const auto& path : filePaths) {
-            std::wstring widePath = Utf8ToWide(path);
-            if (widePath.empty()) return false;
-            std::vector<uint8_t> buffer;
-            if (!ReadFileToBytes(widePath, buffer)) return false;
-            fullPaths.push_back(std::move(widePath));
-            fileNames.push_back(GetFileName(fullPaths.back()));
-            fileContents.push_back(std::move(buffer));
+        for (const auto& e : files) {
+            const std::wstring displayName = Utf8ToWide(SanitizeRemoteBasenameUtf8(e.file_name));
+            if (displayName.empty()) {
+                for (const auto& p : fullPaths) {
+                    DeleteFileW(p.c_str());
+                }
+                return false;
+            }
+            std::wstring tmpPath = WriteRemoteBytesToTempFile(e.bytes);
+            if (tmpPath.empty()) {
+                for (const auto& p : fullPaths) {
+                    DeleteFileW(p.c_str());
+                }
+                return false;
+            }
+            fullPaths.push_back(std::move(tmpPath));
+            fileNames.push_back(displayName);
+            fileContents.push_back(e.bytes);
         }
 
         HRESULT hr = OleInitialize(nullptr);
