@@ -52,6 +52,9 @@
 
 namespace {
 
+/** FileTransfer / document store live on this well-known name, not on org.freedesktop.portal.Desktop. */
+constexpr const char kPortalDocumentsBusName[] = "org.freedesktop.portal.Documents";
+
 std::string SanitizeClipboardBasename(const std::string& file_name) {
     std::string base = file_name;
     const size_t slash = base.find_last_of("/\\");
@@ -435,7 +438,7 @@ class PlatformInputLinux : public IPlatformInput {
             GError* e = nullptr;
             g_dbus_connection_call_sync(
                 connection,
-                "org.freedesktop.portal.Desktop",
+                kPortalDocumentsBusName,
                 "/org/freedesktop/portal/documents",
                 "org.freedesktop.portal.FileTransfer",
                 "StopTransfer",
@@ -514,7 +517,7 @@ class PlatformInputLinux : public IPlatformInput {
         GError* error = nullptr;
         GVariant* res = g_dbus_connection_call_sync(
             connection,
-            "org.freedesktop.portal.Desktop",
+            kPortalDocumentsBusName,
             "/org/freedesktop/portal/documents",
             "org.freedesktop.portal.FileTransfer",
             "RetrieveFiles",
@@ -852,6 +855,8 @@ class PlatformInputLinux : public IPlatformInput {
             }
             const bool ok = m_wlClipboard.SetFiles(paths);
             if (!ok) {
+                std::cerr << "[SetClipboardFilesRemote] wl-copy path failed (empty URI list or wl-copy exited "
+                             "with error). Install wl-clipboard and check WAYLAND_DISPLAY.\n";
                 for (const auto& rp : paths) {
                     unlink(rp.c_str());
                 }
@@ -886,13 +891,15 @@ class PlatformInputLinux : public IPlatformInput {
         GVariantBuilder st_opts;
         g_variant_builder_init(&st_opts, G_VARIANT_TYPE_VARDICT);
         g_variant_builder_add(&st_opts, "{sv}", "writable", g_variant_new_boolean(FALSE));
-        g_variant_builder_add(&st_opts, "{sv}", "autostop", g_variant_new_boolean(TRUE));
+        // FALSE: przy TRUE portal zamyka transfer po pierwszym RetrieveFiles — Nautilus/inne
+        // robią wtedy stat + kopię w kilku krokach i trafiają na już usunięty plik w /tmp.
+        g_variant_builder_add(&st_opts, "{sv}", "autostop", g_variant_new_boolean(FALSE));
         GVariant* st_opts_done = g_variant_builder_end(&st_opts);
 
         GError* st_err = nullptr;
         GVariant* st_res = g_dbus_connection_call_sync(
             connection,
-            "org.freedesktop.portal.Desktop",
+            kPortalDocumentsBusName,
             "/org/freedesktop/portal/documents",
             "org.freedesktop.portal.FileTransfer",
             "StartTransfer",
@@ -933,7 +940,7 @@ class PlatformInputLinux : public IPlatformInput {
             GError* se = nullptr;
             g_dbus_connection_call_sync(
                 connection,
-                "org.freedesktop.portal.Desktop",
+                kPortalDocumentsBusName,
                 "/org/freedesktop/portal/documents",
                 "org.freedesktop.portal.FileTransfer",
                 "StopTransfer",
@@ -983,7 +990,7 @@ class PlatformInputLinux : public IPlatformInput {
             // DBus: AddFiles(s key, ah fds, a{sv} options) — musi być @ah (tablica h), nie @h.
             GVariant* add_res = g_dbus_connection_call_with_unix_fd_list_sync(
                 connection,
-                "org.freedesktop.portal.Desktop",
+                kPortalDocumentsBusName,
                 "/org/freedesktop/portal/documents",
                 "org.freedesktop.portal.FileTransfer",
                 "AddFiles",
@@ -1009,6 +1016,11 @@ class PlatformInputLinux : public IPlatformInput {
         }
 
         const std::string uri_payload = BuildUriListFromAbsPaths(abs_paths);
+        if (uri_payload.empty()) {
+            std::cerr << "[SetClipboardFilesRemote] BuildUriListFromAbsPaths produced empty payload\n";
+            fail_cleanup();
+            return false;
+        }
 
         {
             std::lock_guard<std::mutex> lock(clipboard_mutex);
@@ -2589,7 +2601,7 @@ class PlatformInputLinux : public IPlatformInput {
             if (this->m_file_transfer_signal_id == 0) {
                 this->m_file_transfer_signal_id = g_dbus_connection_signal_subscribe(
                     this->connection,
-                    "org.freedesktop.portal.Desktop",
+                    kPortalDocumentsBusName,
                     "org.freedesktop.portal.FileTransfer",
                     "TransferClosed",
                     "/org/freedesktop/portal/documents",
