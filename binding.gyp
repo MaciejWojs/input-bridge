@@ -27,11 +27,15 @@
           "defines": [
             "USE_X11_BACKEND"
           ],
+          "cflags_cc": [
+            "<!@(pkg-config --cflags glib-2.0)"
+          ],
           "libraries": [
             "-lX11",
             "-lXtst",
             "-lXrandr",
-            "-lXfixes"
+            "-lXfixes",
+            "<!@(pkg-config --libs glib-2.0)"
           ]
         }],
 

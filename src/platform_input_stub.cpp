@@ -19,7 +19,7 @@ class PlatformInputStub : public IPlatformInput {
         return std::nullopt;
     }
 
-    bool SetClipboardFilesRemote(const std::vector<std::string>&) override {
+    bool SetClipboardFilesRemote(const std::vector<ClipboardRemoteFileEntry>&) override {
         return false;
     }
 

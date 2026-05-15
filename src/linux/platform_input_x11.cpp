@@ -11,6 +11,7 @@
 #undef KeyRelease
 
 #include <unistd.h>
+#include <glib.h>
 #include <dlfcn.h>
 #include <chrono>
 #include <mutex>
@@ -24,6 +25,77 @@
 #include <map>
 
 #include <algorithm>
+
+namespace {
+
+std::string SanitizeClipboardBasenameX11(const std::string& file_name) {
+    std::string base = file_name;
+    const size_t slash = base.find_last_of("/\\");
+    if (slash != std::string::npos) {
+        base = base.substr(slash + 1);
+    }
+    std::string out;
+    out.reserve(base.size());
+    for (unsigned char c : base) {
+        if (std::isalnum(c) != 0 || c == '.' || c == '_' || c == '-') {
+            out.push_back(static_cast<char>(c));
+        } else if (c == ' ') {
+            out.push_back('_');
+        }
+    }
+    if (out.empty() || out == "." || out == "..") {
+        out = "file.bin";
+    }
+    return out;
+}
+
+bool WriteClipboardTempFileX11(const std::vector<uint8_t>& bytes, const std::string& basename_hint, std::string& out_abs_path) {
+    const std::string safe = SanitizeClipboardBasenameX11(basename_hint);
+    GError* err = nullptr;
+    gchar* tmpl = g_strdup_printf("input-bridge-clipboard-XXXXXX-%s", safe.c_str());
+    gchar* path_used = nullptr;
+    const int fd = g_file_open_tmp(tmpl, &path_used, &err);
+    g_free(tmpl);
+    if (fd < 0) {
+        if (err) {
+            g_error_free(err);
+        }
+        return false;
+    }
+    if (!bytes.empty()) {
+        const ssize_t n = static_cast<ssize_t>(write(fd, bytes.data(), bytes.size()));
+        if (n != static_cast<ssize_t>(bytes.size())) {
+            close(fd);
+            unlink(path_used);
+            g_free(path_used);
+            return false;
+        }
+    }
+    close(fd);
+    out_abs_path.assign(path_used);
+    g_free(path_used);
+    return true;
+}
+
+std::string BuildUriListFromAbsPathsX11(const std::vector<std::string>& abs_paths) {
+    std::string payload;
+    for (const auto& file : abs_paths) {
+        GError* err = nullptr;
+        gchar* uri = g_filename_to_uri(file.c_str(), nullptr, &err);
+        if (!uri) {
+            if (err) {
+                g_error_free(err);
+            }
+            continue;
+        }
+        payload += uri;
+        payload += "\r\n";
+        g_free(uri);
+    }
+    return payload;
+}
+
+} // namespace
 
 using xkb_utf32_to_keysym_t = uint32_t(*)(uint32_t);
 static void* xkb_handle = nullptr;
@@ -246,6 +318,14 @@ class X11PlatformInput : public IPlatformInput {
     std::vector<MonitorInfo> m_monitors;
     std::mutex m_monitorMutex;
     int32_t m_currentMonitorIndex = 0;
+    std::vector<std::string> m_pendingX11RemoteTempPaths;
+
+    void ClearPendingX11RemoteTemps() {
+        for (const auto& p : m_pendingX11RemoteTempPaths) {
+            unlink(p.c_str());
+        }
+        m_pendingX11RemoteTempPaths.clear();
+    }
 
     static int64_t CurrentTimestampMs() {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -281,6 +361,7 @@ class X11PlatformInput : public IPlatformInput {
         fwrite(text.data(), 1, text.size(), pipe);
         bool ok = pclose(pipe) == 0;
         if (ok) {
+            ClearPendingX11RemoteTemps();
             EmitClipboardChange("text", {}, text);
         }
         return ok;
@@ -302,12 +383,14 @@ class X11PlatformInput : public IPlatformInput {
         if (IsLastClipboardContent("files", files, {})) {
             return true;
         }
+        ClearPendingX11RemoteTemps();
+        const std::string payload = BuildUriListFromAbsPathsX11(files);
+        if (payload.empty()) {
+            return false;
+        }
         FILE* pipe = popen("xclip -selection clipboard -t text/uri-list -i", "w");
         if (!pipe) return false;
-        for (const auto& file : files) {
-            std::string uri = "file://" + file + "\r\n";
-            fwrite(uri.data(), 1, uri.size(), pipe);
-        }
+        fwrite(payload.data(), 1, payload.size(), pipe);
         bool ok = pclose(pipe) == 0;
         if (ok) {
             EmitClipboardChange("files", files, {});
@@ -324,17 +407,67 @@ class X11PlatformInput : public IPlatformInput {
             std::string line = buffer;
             if (!line.empty() && line.back() == '\n') line.pop_back();
             if (!line.empty() && line.back() == '\r') line.pop_back();
-            const std::string prefix = "file://";
-            if (line.compare(0, prefix.size(), prefix) == 0) {
-                files.push_back(line.substr(prefix.size()));
+            GError* err = nullptr;
+            gchar* fn = g_filename_from_uri(line.c_str(), nullptr, &err);
+            if (fn) {
+                files.emplace_back(fn);
+                g_free(fn);
+            } else {
+                if (err) {
+                    g_error_free(err);
+                }
+                const std::string prefix = "file://";
+                if (line.compare(0, prefix.size(), prefix) == 0) {
+                    files.push_back(line.substr(prefix.size()));
+                }
             }
         }
         pclose(pipe);
         return files.empty() ? std::nullopt : std::make_optional(files);
     }
 
-    bool SetClipboardFilesRemote(const std::vector<std::string>& files) override {
-        return SetClipboardFiles(files);
+    bool SetClipboardFilesRemote(const std::vector<ClipboardRemoteFileEntry>& files) override {
+        if (files.empty()) {
+            return false;
+        }
+        ClearPendingX11RemoteTemps();
+        std::vector<std::string> paths;
+        paths.reserve(files.size());
+        for (const auto& e : files) {
+            std::string p;
+            if (!WriteClipboardTempFileX11(e.bytes, e.file_name, p)) {
+                for (const auto& rp : paths) {
+                    unlink(rp.c_str());
+                }
+                return false;
+            }
+            paths.push_back(std::move(p));
+        }
+        const std::string payload = BuildUriListFromAbsPathsX11(paths);
+        if (payload.empty()) {
+            for (const auto& rp : paths) {
+                unlink(rp.c_str());
+            }
+            return false;
+        }
+        FILE* pipe = popen("xclip -selection clipboard -t text/uri-list -i", "w");
+        if (!pipe) {
+            for (const auto& rp : paths) {
+                unlink(rp.c_str());
+            }
+            return false;
+        }
+        fwrite(payload.data(), 1, payload.size(), pipe);
+        bool ok = pclose(pipe) == 0;
+        if (!ok) {
+            for (const auto& rp : paths) {
+                unlink(rp.c_str());
+            }
+            return false;
+        }
+        m_pendingX11RemoteTempPaths = std::move(paths);
+        EmitClipboardChange("files", m_pendingX11RemoteTempPaths, {});
+        return true;
     }
 
     std::optional<std::vector<std::string>> GetClipboardFilesRemote() override {
@@ -476,6 +609,7 @@ class X11PlatformInput : public IPlatformInput {
     }
 
     ~X11PlatformInput() override {
+        ClearPendingX11RemoteTemps();
         if (m_display != nullptr) {
             // Restore scratch variables
             if (m_scratchInitialized) {

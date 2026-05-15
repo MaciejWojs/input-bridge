@@ -49,6 +49,11 @@ struct MonitorInfo {
     bool primary = false;
 };
 
+struct ClipboardRemoteFileEntry {
+    std::string file_name;
+    std::vector<uint8_t> bytes;
+};
+
 using InputEvent = std::variant<MouseMoveRelative, MouseMoveAbsolute, MouseClick, KeyPress, MouseScroll, TypeCharacter>;
 
 class IPlatformInput {
@@ -122,10 +127,9 @@ class IPlatformInput {
     // Gets file paths from clipboard (CF_HDROP). Returns std::nullopt if unavailable.
     virtual std::optional<std::vector<std::string>> GetClipboardFiles() = 0;
 
-    // Sets files into a remote-capable clipboard format, including file descriptor
-    // and stream contents. This is required for Remote Desktop/redirected clipboard
-    // file transfer.
-    virtual bool SetClipboardFilesRemote(const std::vector<std::string>& filePaths) = 0;
+    // Sets files from in-memory bytes (e.g. WebRTC). The platform may use temp files
+    // internally (XDG File Transfer on Wayland portal, OLE/HDROP on Windows).
+    virtual bool SetClipboardFilesRemote(const std::vector<ClipboardRemoteFileEntry>& files) = 0;
     // Gets file descriptors from a remote-capable clipboard format. Returns file names
     // if available, or std::nullopt otherwise.
     virtual std::optional<std::vector<std::string>> GetClipboardFilesRemote() = 0;
